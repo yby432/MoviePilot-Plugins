@@ -27,7 +27,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：迎客、摸头、领取每日收益。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.2"
     plugin_author = "Codex"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -421,18 +421,47 @@ class PandaDaily(_PluginBase):
 
     @staticmethod
     def __extract_assets(page_html: str) -> list[dict[str, Any]]:
-        # 页面把初始数据直接写在 new Vue({...}) 中，这里只提取 home.my_assets。
-        script_match = re.search(r"new Vue\(\{\s*el:\s*'#app'.*?\n\}\);", page_html, re.S)
-        if not script_match:
-            raise RuntimeError("无法找到好友买卖页面数据，可能未登录或页面结构已变化")
+        # 页面把初始数据写在 new Vue({...}) 中。不同环境返回的 HTML 换行可能不同，
+        # 所以这里只定位 home: 后面的对象，再用括号配对提取完整 JSON。
+        script = unescape(page_html)
+        home_key = re.search(r"\bhome\s*:\s*\{", script)
+        if not home_key:
+            if "login.php" in script or "logout.php" not in script:
+                raise RuntimeError("未找到登录后的好友买卖数据，请检查 MoviePilot 站点 Cookie 是否有效")
+            raise RuntimeError("无法找到好友买卖页面数据，可能页面结构已变化")
 
-        script = unescape(script_match.group(0))
-        home_match = re.search(r"home:\s*(\{.*?\}),\s*assetPage:", script, re.S)
-        if not home_match:
+        object_start = script.find("{", home_key.start())
+        object_end = PandaDaily.__find_matching_brace(script, object_start)
+        if object_end < 0:
             raise RuntimeError("无法解析好友买卖页面数据")
 
-        home = json.loads(home_match.group(1))
+        home = json.loads(script[object_start:object_end + 1])
         return home.get("my_assets") or []
+
+    @staticmethod
+    def __find_matching_brace(text: str, start: int) -> int:
+        depth = 0
+        quote = ""
+        escape = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if quote:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in ("'", '"'):
+                quote = char
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return index
+        return -1
 
     @staticmethod
     def __ensure_ok(response: dict[str, Any], label: str):
