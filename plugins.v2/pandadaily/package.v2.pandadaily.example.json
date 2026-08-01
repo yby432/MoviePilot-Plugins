@@ -1,17 +1,17 @@
 {
   "PandaDaily": {
     "name": "PANDA 每日任务",
-    "description": "自动完成 PANDA 好友买卖：迎客、摸头、领取每日收益。",
+    "description": "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。",
     "labels": "站点,自动化",
     "version": "1.0.3",
     "icon": "signin.png",
-    "author": "Codex",
+    "author": "yby432",
     "level": 1,
     "history": {
       "v1.0.3": "配置页改为中文下拉，可自由选择全部工作和互动",
       "v1.0.2": "增强好友买卖页面数据解析，兼容不同 HTML 换行格式",
       "v1.0.1": "优先读取 MoviePilot 站点 Cookie，插件 Cookie 改为备用",
-      "v1.0.0": "初始版本：支持迎客、摸头和领取每日收益"
+      "v1.0.0": "初始版本：支持工作、互动和领取每日收益"
     }
   }
 }
