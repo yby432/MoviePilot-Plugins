@@ -23,8 +23,8 @@ except Exception:
 
 class PandaDaily(_PluginBase):
     # 插件基础信息：这些字段会显示在 MoviePilot 插件市场和插件详情中。
-    plugin_name = "PANDA Daily"
-    plugin_desc = "Run PANDA friend-trade daily tasks: greeting work, pat interaction, and income claim."
+    plugin_name = "PANDA 每日任务"
+    plugin_desc = "自动完成 PANDA 好友买卖：迎客、摸头、领取每日收益。"
     plugin_icon = "signin.png"
     plugin_version = "1.0.0"
     plugin_author = "Codex"
@@ -43,7 +43,7 @@ class PandaDaily(_PluginBase):
     _delay = 1.0
     _work_key = "greeting"
     _interaction_key = "pat"
-    _last_result = "Not run yet"
+    _last_result = "尚未执行"
     _last_run_at = ""
 
     _friend_trade_url = "https://pandapt.net/friend-trade.php"
@@ -73,7 +73,7 @@ class PandaDaily(_PluginBase):
                 func=self.run_daily,
                 trigger="date",
                 run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
-                name="PANDA Daily",
+                name="PANDA 每日任务",
             )
             self._onlyonce = False
             self.__update_config()
@@ -96,18 +96,18 @@ class PandaDaily(_PluginBase):
         if not self._enabled:
             return []
         if not self._cron:
-            logger.warning("PANDA Daily cron is empty; service is not started")
+            logger.warning("PANDA 每日任务未配置 cron，定时服务不启动")
             return []
         try:
             return [{
                 "id": "PandaDaily",
-                "name": "PANDA Daily",
+                "name": "PANDA 每日任务",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.run_daily,
                 "kwargs": {},
             }]
         except Exception as err:
-            logger.error(f"PANDA Daily cron error: {err}")
+            logger.error(f"PANDA 每日任务 cron 配置错误：{err}")
             return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -124,7 +124,7 @@ class PandaDaily(_PluginBase):
                                 "props": {"cols": 12, "md": 3},
                                 "content": [{
                                     "component": "VSwitch",
-                                    "props": {"model": "enabled", "label": "Enable plugin"},
+                                    "props": {"model": "enabled", "label": "启用插件"},
                                 }],
                             },
                             {
@@ -132,7 +132,7 @@ class PandaDaily(_PluginBase):
                                 "props": {"cols": 12, "md": 3},
                                 "content": [{
                                     "component": "VSwitch",
-                                    "props": {"model": "notify", "label": "Send notification"},
+                                    "props": {"model": "notify", "label": "发送通知"},
                                 }],
                             },
                             {
@@ -140,7 +140,7 @@ class PandaDaily(_PluginBase):
                                 "props": {"cols": 12, "md": 3},
                                 "content": [{
                                     "component": "VSwitch",
-                                    "props": {"model": "onlyonce", "label": "Run once now"},
+                                    "props": {"model": "onlyonce", "label": "立即运行一次"},
                                 }],
                             },
                             {
@@ -150,8 +150,8 @@ class PandaDaily(_PluginBase):
                                     "component": "VTextField",
                                     "props": {
                                         "model": "delay",
-                                        "label": "Request delay seconds",
-                                        "placeholder": "Default: 1",
+                                        "label": "请求间隔秒数",
+                                        "placeholder": "默认 1",
                                     },
                                 }],
                             },
@@ -167,8 +167,8 @@ class PandaDaily(_PluginBase):
                                     "component": "VCronField",
                                     "props": {
                                         "model": "cron",
-                                        "label": "Cron schedule",
-                                        "placeholder": "Default: 0 7 * * *",
+                                        "label": "执行周期",
+                                        "placeholder": "默认 0 7 * * *",
                                     },
                                 }],
                             },
@@ -179,7 +179,7 @@ class PandaDaily(_PluginBase):
                                     "component": "VTextField",
                                     "props": {
                                         "model": "work_key",
-                                        "label": "Work key",
+                                        "label": "工作 Key",
                                         "placeholder": "greeting",
                                     },
                                 }],
@@ -191,7 +191,7 @@ class PandaDaily(_PluginBase):
                                     "component": "VTextField",
                                     "props": {
                                         "model": "interaction_key",
-                                        "label": "Interaction key",
+                                        "label": "互动 Key",
                                         "placeholder": "pat",
                                     },
                                 }],
@@ -210,7 +210,7 @@ class PandaDaily(_PluginBase):
                                         "model": "cookie",
                                         "label": "PANDA Cookie",
                                         "rows": 4,
-                                        "placeholder": "Paste the Cookie request header from a logged-in pandapt.net browser session.",
+                                        "placeholder": "从已登录浏览器复制 pandapt.net 的 Cookie 请求头",
                                     },
                                 }],
                             },
@@ -227,7 +227,7 @@ class PandaDaily(_PluginBase):
                                     "props": {
                                         "type": "info",
                                         "variant": "tonal",
-                                        "text": "Defaults: run at 07:00 daily, work_key=greeting, interaction_key=pat. Cookie is equivalent to a logged-in session.",
+                                        "text": "默认每天 07:00 执行；工作 Key greeting=迎客，互动 Key pat=摸头。Cookie 等同网页登录态，请只保存在可信 NAS 上。",
                                     },
                                 }],
                             },
@@ -254,7 +254,7 @@ class PandaDaily(_PluginBase):
             "props": {
                 "type": "info",
                 "variant": "tonal",
-                "text": f"Last run: {self._last_run_at or 'none'}; result: {self._last_result or 'none'}",
+                "text": f"最近执行：{self._last_run_at or '暂无'}；结果：{self._last_result or '暂无'}",
             },
         }]
 
@@ -266,38 +266,38 @@ class PandaDaily(_PluginBase):
                 if self._scheduler.running:
                     self._scheduler.shutdown()
         except Exception as err:
-            logger.error(f"PANDA Daily stop service failed: {err}")
+            logger.error(f"PANDA 每日任务停止服务失败：{err}")
         finally:
             self._scheduler = None
 
     def run_daily(self):
         # 定时任务主入口：捕获所有异常并写入最近执行结果，避免后台服务崩溃。
-        logger.info("PANDA Daily started")
+        logger.info("PANDA 每日任务开始执行")
         self._last_run_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
             result = self.__run()
             self._last_result = result
-            logger.info(f"PANDA Daily finished: {result}")
+            logger.info(f"PANDA 每日任务执行完成：{result}")
             if self._notify:
-                self.__notify("PANDA Daily finished", result)
+                self.__notify("PANDA 每日任务完成", result)
         except Exception as err:
-            self._last_result = f"Failed: {err}"
-            logger.error(f"PANDA Daily failed: {err}\n{traceback.format_exc()}")
+            self._last_result = f"执行失败：{err}"
+            logger.error(f"PANDA 每日任务执行失败：{err}\n{traceback.format_exc()}")
             if self._notify:
-                self.__notify("PANDA Daily failed", self._last_result)
+                self.__notify("PANDA 每日任务失败", self._last_result)
         finally:
             self.__update_config()
 
     def __run(self) -> str:
         if not self._cookie:
-            raise RuntimeError("Cookie is empty")
+            raise RuntimeError("未配置 Cookie")
 
         # 先读取好友买卖首页，从页面内联 Vue 数据中解析佣人列表与今日状态。
         page = self.__request_text(self._friend_trade_url)
         assets = self.__extract_assets(page)
         if not assets:
-            raise RuntimeError("No friend-trade assets found. Cookie may be expired.")
+            raise RuntimeError("未找到佣人资产，请检查 Cookie 是否有效")
 
         work_done = 0
         work_skip = 0
@@ -314,7 +314,7 @@ class PandaDaily(_PluginBase):
                     "target_uid": uid,
                     "work_key": self._work_key,
                 })
-                self.__ensure_ok(response, f"{name} work")
+                self.__ensure_ok(response, f"{name} 安排工作")
                 work_done += 1
                 self.__sleep()
             else:
@@ -330,14 +330,14 @@ class PandaDaily(_PluginBase):
                     "target_uid": uid,
                     "interaction_key": self._interaction_key,
                 })
-                self.__ensure_ok(response, f"{name} interaction")
+                self.__ensure_ok(response, f"{name} 今日互动")
                 interact_done += 1
                 self.__sleep()
             else:
                 interact_skip += 1
 
         income_response = self.__post_action("friendTradeClaimIncome")
-        self.__ensure_ok(income_response, "claim income")
+        self.__ensure_ok(income_response, "领取每日收益")
         claimed_amount = (
             (income_response.get("data") or {}).get("claimed_amount")
             or (income_response.get("data") or {}).get("amount")
@@ -345,9 +345,9 @@ class PandaDaily(_PluginBase):
         )
 
         return (
-            f"assets={len(assets)}, work_done={work_done}, work_skip={work_skip}, "
-            f"interact_done={interact_done}, interact_skip={interact_skip}, "
-            f"claimed=+{claimed_amount}"
+            f"佣人 {len(assets)} 个；安排工作完成 {work_done} 个，跳过 {work_skip} 个；"
+            f"摸头互动完成 {interact_done} 个，跳过 {interact_skip} 个；"
+            f"领取收益 +{claimed_amount} 魔力"
         )
 
     def __request_text(self, url: str) -> str:
@@ -374,7 +374,7 @@ class PandaDaily(_PluginBase):
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            return {"ret": -1, "msg": "Non-JSON response", "raw": raw[:500]}
+            return {"ret": -1, "msg": "接口返回非 JSON", "raw": raw[:500]}
 
     def __headers(self) -> dict[str, str]:
         return {
@@ -388,12 +388,12 @@ class PandaDaily(_PluginBase):
         # 页面把初始数据直接写在 new Vue({...}) 中，这里只提取 home.my_assets。
         script_match = re.search(r"new Vue\(\{\s*el:\s*'#app'.*?\n\}\);", page_html, re.S)
         if not script_match:
-            raise RuntimeError("Could not find friend-trade page data. You may not be logged in.")
+            raise RuntimeError("无法找到好友买卖页面数据，可能未登录或页面结构已变化")
 
         script = unescape(script_match.group(0))
         home_match = re.search(r"home:\s*(\{.*?\}),\s*assetPage:", script, re.S)
         if not home_match:
-            raise RuntimeError("Could not parse friend-trade page data.")
+            raise RuntimeError("无法解析好友买卖页面数据")
 
         home = json.loads(home_match.group(1))
         return home.get("my_assets") or []
@@ -401,7 +401,7 @@ class PandaDaily(_PluginBase):
     @staticmethod
     def __ensure_ok(response: dict[str, Any], label: str):
         if response.get("ret") != 0:
-            raise RuntimeError(f"{label} failed: {response.get('msg') or response}")
+            raise RuntimeError(f"{label}失败：{response.get('msg') or response}")
 
     def __sleep(self):
         if self._delay > 0:
@@ -422,9 +422,9 @@ class PandaDaily(_PluginBase):
             try:
                 post_message(title=title, text=text)
             except Exception as err:
-                logger.warning(f"PANDA Daily notification failed: {err}")
+                logger.warning(f"PANDA 每日任务发送通知失败：{err}")
         except Exception as err:
-            logger.warning(f"PANDA Daily notification failed: {err}")
+            logger.warning(f"PANDA 每日任务发送通知失败：{err}")
 
     def __update_config(self):
         self.update_config({
