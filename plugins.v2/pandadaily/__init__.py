@@ -25,10 +25,10 @@ except Exception:
 class PandaDaily(_PluginBase):
     # 插件基础信息：这些字段会显示在 MoviePilot 插件市场和插件详情中。
     plugin_name = "PANDA 每日任务"
-    plugin_desc = "自动完成 PANDA 好友买卖：迎客、摸头、领取每日收益。"
+    plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。"
     plugin_icon = "signin.png"
     plugin_version = "1.0.3"
-    plugin_author = "Codex"
+    plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
     plugin_order = 50
