@@ -1,0 +1,14 @@
+{
+  "PandaDaily": {
+    "name": "PANDA Daily",
+    "description": "Run PANDA friend-trade daily tasks: greeting work, pat interaction, and income claim.",
+    "labels": "site,automation",
+    "version": "1.0.0",
+    "icon": "signin.png",
+    "author": "Codex",
+    "level": 1,
+    "history": {
+      "v1.0.0": "Initial version: greeting work, pat interaction, and daily income claim"
+    }
+  }
+}
