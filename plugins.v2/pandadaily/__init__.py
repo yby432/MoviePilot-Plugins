@@ -22,6 +22,7 @@ except Exception:
 
 
 class PandaDaily(_PluginBase):
+    # 插件基础信息：这些字段会显示在 MoviePilot 插件市场和插件详情中。
     plugin_name = "PANDA Daily"
     plugin_desc = "Run PANDA friend-trade daily tasks: greeting work, pat interaction, and income claim."
     plugin_icon = "signin.png"
@@ -32,6 +33,7 @@ class PandaDaily(_PluginBase):
     plugin_order = 50
     auth_level = 1
 
+    # 运行时状态与用户配置。
     _scheduler: Optional[BackgroundScheduler] = None
     _enabled = False
     _onlyonce = False
@@ -48,6 +50,7 @@ class PandaDaily(_PluginBase):
     _ajax_url = "https://pandapt.net/ajax.php"
 
     def init_plugin(self, config: dict = None):
+        # 配置变更时先停止旧的一次性调度器，避免重复触发。
         self.stop_service()
 
         if config:
@@ -63,6 +66,8 @@ class PandaDaily(_PluginBase):
             self._last_run_at = config.get("last_run_at") or self._last_run_at
 
         if self._onlyonce:
+            # “立即运行一次”通过独立 BackgroundScheduler 延迟 3 秒执行，
+            # 保存配置后插件宿主有时间完成刷新。
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             self._scheduler.add_job(
                 func=self.run_daily,
@@ -87,6 +92,7 @@ class PandaDaily(_PluginBase):
         return []
 
     def get_service(self) -> List[Dict[str, Any]]:
+        # MoviePilot 公共服务入口：启用后按 cron 定时调用 run_daily。
         if not self._enabled:
             return []
         if not self._cron:
@@ -105,6 +111,7 @@ class PandaDaily(_PluginBase):
             return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        # 使用 MoviePilot 的 Vuetify JSON 表单配置，无需单独前端页面。
         return [
             {
                 "component": "VForm",
@@ -252,6 +259,7 @@ class PandaDaily(_PluginBase):
         }]
 
     def stop_service(self):
+        # 停用插件或重新加载配置时清理一次性调度器。
         try:
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
@@ -263,6 +271,7 @@ class PandaDaily(_PluginBase):
             self._scheduler = None
 
     def run_daily(self):
+        # 定时任务主入口：捕获所有异常并写入最近执行结果，避免后台服务崩溃。
         logger.info("PANDA Daily started")
         self._last_run_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -284,6 +293,7 @@ class PandaDaily(_PluginBase):
         if not self._cookie:
             raise RuntimeError("Cookie is empty")
 
+        # 先读取好友买卖首页，从页面内联 Vue 数据中解析佣人列表与今日状态。
         page = self.__request_text(self._friend_trade_url)
         assets = self.__extract_assets(page)
         if not assets:
@@ -295,6 +305,7 @@ class PandaDaily(_PluginBase):
         interact_skip = 0
 
         for asset in assets:
+            # can_work_today 为 True 时才提交工作，避免重复执行当天任务。
             name = asset.get("username")
             uid = asset.get("slave_uid")
             summary = asset.get("cultivation_summary") or {}
@@ -310,6 +321,7 @@ class PandaDaily(_PluginBase):
                 work_skip += 1
 
         for asset in assets:
+            # can_interact_today 为 True 时才提交互动，默认 interaction_key=pat（摸头）。
             name = asset.get("username")
             uid = asset.get("slave_uid")
             summary = asset.get("cultivation_summary") or {}
@@ -344,6 +356,7 @@ class PandaDaily(_PluginBase):
             return response.read().decode("utf-8", errors="replace")
 
     def __post_action(self, action: str, params: dict[str, Any] = None) -> dict[str, Any]:
+        # PANDA 好友买卖接口统一通过 ajax.php + action 调用。
         params = params or {}
         body = {"action": action}
         for key, value in params.items():
@@ -372,6 +385,7 @@ class PandaDaily(_PluginBase):
 
     @staticmethod
     def __extract_assets(page_html: str) -> list[dict[str, Any]]:
+        # 页面把初始数据直接写在 new Vue({...}) 中，这里只提取 home.my_assets。
         script_match = re.search(r"new Vue\(\{\s*el:\s*'#app'.*?\n\}\);", page_html, re.S)
         if not script_match:
             raise RuntimeError("Could not find friend-trade page data. You may not be logged in.")
@@ -395,6 +409,7 @@ class PandaDaily(_PluginBase):
             time.sleep(self._delay)
 
     def __notify(self, title: str, text: str):
+        # 不同 MoviePilot 版本的 post_message 签名可能略有不同，因此做兼容调用。
         post_message = getattr(self, "post_message", None)
         if not callable(post_message):
             return
