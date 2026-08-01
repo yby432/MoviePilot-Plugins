@@ -27,7 +27,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：迎客、摸头、领取每日收益。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "Codex"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -50,6 +50,25 @@ class PandaDaily(_PluginBase):
 
     _friend_trade_url = "https://pandapt.net/friend-trade.php"
     _ajax_url = "https://pandapt.net/ajax.php"
+    _work_options = [
+        {"title": "打扫", "value": "clean"},
+        {"title": "跑腿", "value": "errand"},
+        {"title": "休息", "value": "rest"},
+        {"title": "整理", "value": "tidy"},
+        {"title": "迎客", "value": "greeting"},
+        {"title": "陪聊", "value": "chat"},
+        {"title": "洗头按摩", "value": "hair_massage"},
+        {"title": "贴身照料", "value": "close_care"},
+        {"title": "护主值守", "value": "guard"},
+    ]
+    _interaction_options = [
+        {"title": "夸夸", "value": "praise"},
+        {"title": "投喂", "value": "feed"},
+        {"title": "摸头", "value": "pat"},
+        {"title": "悄悄话", "value": "whisper"},
+        {"title": "小奖励", "value": "reward"},
+        {"title": "深入交流", "value": "deep_communication"},
+    ]
 
     def init_plugin(self, config: dict = None):
         # 配置变更时先停止旧的一次性调度器，避免重复触发。
@@ -191,11 +210,13 @@ class PandaDaily(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 2},
                                 "content": [{
-                                    "component": "VTextField",
+                                    "component": "VSelect",
                                     "props": {
                                         "model": "work_key",
-                                        "label": "工作 Key",
-                                        "placeholder": "greeting",
+                                        "label": "安排工作",
+                                        "items": self._work_options,
+                                        "item-title": "title",
+                                        "item-value": "value",
                                     },
                                 }],
                             },
@@ -203,11 +224,13 @@ class PandaDaily(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 2},
                                 "content": [{
-                                    "component": "VTextField",
+                                    "component": "VSelect",
                                     "props": {
                                         "model": "interaction_key",
-                                        "label": "互动 Key",
-                                        "placeholder": "pat",
+                                        "label": "今日互动",
+                                        "items": self._interaction_options,
+                                        "item-title": "title",
+                                        "item-value": "value",
                                     },
                                 }],
                             },
@@ -242,7 +265,7 @@ class PandaDaily(_PluginBase):
                                     "props": {
                                         "type": "info",
                                         "variant": "tonal",
-                                        "text": "默认每天 07:00 执行；插件会优先读取 MoviePilot 站点里的 PANDA Cookie。工作 Key greeting=迎客，互动 Key pat=摸头。",
+                                        "text": "默认每天 07:00 执行；插件会优先读取 MoviePilot 站点里的 PANDA Cookie。工作和互动可在上方自由选择。",
                                     },
                                 }],
                             },
@@ -318,8 +341,11 @@ class PandaDaily(_PluginBase):
 
         work_done = 0
         work_skip = 0
+        work_unavailable = 0
         interact_done = 0
         interact_skip = 0
+        work_label = self.__option_label(self._work_options, self._work_key)
+        interaction_label = self.__option_label(self._interaction_options, self._interaction_key)
 
         for asset in assets:
             # can_work_today 为 True 时才提交工作，避免重复执行当天任务。
@@ -327,6 +353,11 @@ class PandaDaily(_PluginBase):
             uid = asset.get("slave_uid")
             summary = asset.get("cultivation_summary") or {}
             if summary.get("can_work_today"):
+                available_works = summary.get("available_works") or {}
+                if available_works and self._work_key not in available_works:
+                    work_unavailable += 1
+                    logger.info(f"PANDA 每日任务跳过 {name}：暂不支持工作 {work_label}")
+                    continue
                 response = self.__post_action("friendTradeWork", {
                     "target_uid": uid,
                     "work_key": self._work_key,
@@ -362,8 +393,9 @@ class PandaDaily(_PluginBase):
         )
 
         return (
-            f"佣人 {len(assets)} 个；安排工作完成 {work_done} 个，跳过 {work_skip} 个；"
-            f"摸头互动完成 {interact_done} 个，跳过 {interact_skip} 个；"
+            f"佣人 {len(assets)} 个；安排工作「{work_label}」完成 {work_done} 个，"
+            f"不支持 {work_unavailable} 个，跳过 {work_skip} 个；"
+            f"互动「{interaction_label}」完成 {interact_done} 个，跳过 {interact_skip} 个；"
             f"领取收益 +{claimed_amount} 魔力"
         )
 
@@ -467,6 +499,13 @@ class PandaDaily(_PluginBase):
     def __ensure_ok(response: dict[str, Any], label: str):
         if response.get("ret") != 0:
             raise RuntimeError(f"{label}失败：{response.get('msg') or response}")
+
+    @staticmethod
+    def __option_label(options: list[dict[str, str]], value: str) -> str:
+        for option in options:
+            if option.get("value") == value:
+                return option.get("title") or value
+        return value
 
     def __sleep(self):
         if self._delay > 0:
