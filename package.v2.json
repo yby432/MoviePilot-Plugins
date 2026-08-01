@@ -1,14 +1,14 @@
 {
   "PandaDaily": {
-    "name": "PANDA Daily",
-    "description": "Run PANDA friend-trade daily tasks: greeting work, pat interaction, and income claim.",
-    "labels": "site,automation",
+    "name": "PANDA 每日任务",
+    "description": "自动完成 PANDA 好友买卖：迎客、摸头、领取每日收益。",
+    "labels": "站点,自动化",
     "version": "1.0.0",
     "icon": "signin.png",
     "author": "Codex",
     "level": 1,
     "history": {
-      "v1.0.0": "Initial version: greeting work, pat interaction, and daily income claim"
+      "v1.0.0": "初始版本：支持迎客、摸头和领取每日收益"
     }
   }
 }
