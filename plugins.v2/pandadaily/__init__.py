@@ -12,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
+from app.db.site_oper import SiteOper
 from app.log import logger
 from app.plugins import _PluginBase
 
@@ -39,6 +40,7 @@ class PandaDaily(_PluginBase):
     _onlyonce = False
     _notify = True
     _cookie = ""
+    _site_domain = "pandapt.net"
     _cron = "0 7 * * *"
     _delay = 1.0
     _work_key = "greeting"
@@ -58,6 +60,7 @@ class PandaDaily(_PluginBase):
             self._onlyonce = bool(config.get("onlyonce"))
             self._notify = bool(config.get("notify", True))
             self._cookie = (config.get("cookie") or "").strip()
+            self._site_domain = (config.get("site_domain") or "pandapt.net").strip()
             self._cron = (config.get("cron") or "0 7 * * *").strip()
             self._delay = self.__float_value(config.get("delay"), 1.0)
             self._work_key = (config.get("work_key") or "greeting").strip()
@@ -162,7 +165,19 @@ class PandaDaily(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "site_domain",
+                                        "label": "MoviePilot 站点域名",
+                                        "placeholder": "pandapt.net",
+                                    },
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
                                 "content": [{
                                     "component": "VCronField",
                                     "props": {
@@ -174,7 +189,7 @@ class PandaDaily(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "props": {"cols": 12, "md": 2},
                                 "content": [{
                                     "component": "VTextField",
                                     "props": {
@@ -186,7 +201,7 @@ class PandaDaily(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "props": {"cols": 12, "md": 2},
                                 "content": [{
                                     "component": "VTextField",
                                     "props": {
@@ -208,9 +223,9 @@ class PandaDaily(_PluginBase):
                                     "component": "VTextarea",
                                     "props": {
                                         "model": "cookie",
-                                        "label": "PANDA Cookie",
+                                        "label": "备用 PANDA Cookie",
                                         "rows": 4,
-                                        "placeholder": "从已登录浏览器复制 pandapt.net 的 Cookie 请求头",
+                                        "placeholder": "通常留空；只有 MoviePilot 站点里没有 Cookie 时才需要填写",
                                     },
                                 }],
                             },
@@ -227,7 +242,7 @@ class PandaDaily(_PluginBase):
                                     "props": {
                                         "type": "info",
                                         "variant": "tonal",
-                                        "text": "默认每天 07:00 执行；工作 Key greeting=迎客，互动 Key pat=摸头。Cookie 等同网页登录态，请只保存在可信 NAS 上。",
+                                        "text": "默认每天 07:00 执行；插件会优先读取 MoviePilot 站点里的 PANDA Cookie。工作 Key greeting=迎客，互动 Key pat=摸头。",
                                     },
                                 }],
                             },
@@ -241,6 +256,7 @@ class PandaDaily(_PluginBase):
             "onlyonce": False,
             "cron": "0 7 * * *",
             "delay": 1,
+            "site_domain": "pandapt.net",
             "work_key": "greeting",
             "interaction_key": "pat",
             "cookie": "",
@@ -290,11 +306,12 @@ class PandaDaily(_PluginBase):
             self.__update_config()
 
     def __run(self) -> str:
-        if not self._cookie:
+        cookie = self.__resolve_cookie()
+        if not cookie:
             raise RuntimeError("未配置 Cookie")
 
         # 先读取好友买卖首页，从页面内联 Vue 数据中解析佣人列表与今日状态。
-        page = self.__request_text(self._friend_trade_url)
+        page = self.__request_text(self._friend_trade_url, cookie)
         assets = self.__extract_assets(page)
         if not assets:
             raise RuntimeError("未找到佣人资产，请检查 Cookie 是否有效")
@@ -313,7 +330,7 @@ class PandaDaily(_PluginBase):
                 response = self.__post_action("friendTradeWork", {
                     "target_uid": uid,
                     "work_key": self._work_key,
-                })
+                }, cookie)
                 self.__ensure_ok(response, f"{name} 安排工作")
                 work_done += 1
                 self.__sleep()
@@ -329,14 +346,14 @@ class PandaDaily(_PluginBase):
                 response = self.__post_action("friendTradeInteract", {
                     "target_uid": uid,
                     "interaction_key": self._interaction_key,
-                })
+                }, cookie)
                 self.__ensure_ok(response, f"{name} 今日互动")
                 interact_done += 1
                 self.__sleep()
             else:
                 interact_skip += 1
 
-        income_response = self.__post_action("friendTradeClaimIncome")
+        income_response = self.__post_action("friendTradeClaimIncome", cookie=cookie)
         self.__ensure_ok(income_response, "领取每日收益")
         claimed_amount = (
             (income_response.get("data") or {}).get("claimed_amount")
@@ -350,12 +367,31 @@ class PandaDaily(_PluginBase):
             f"领取收益 +{claimed_amount} 魔力"
         )
 
-    def __request_text(self, url: str) -> str:
-        request = Request(url, headers=self.__headers())
+    def __resolve_cookie(self) -> str:
+        site_cookie = self.__site_cookie()
+        if site_cookie:
+            return site_cookie
+        return self._cookie
+
+    def __site_cookie(self) -> str:
+        domains = [self._site_domain, f"https://{self._site_domain}", f"http://{self._site_domain}"]
+        for domain in domains:
+            try:
+                site = SiteOper().get_by_domain(domain)
+                cookie = (getattr(site, "cookie", "") or "").strip() if site else ""
+                if cookie:
+                    logger.info(f"PANDA 每日任务已使用 MoviePilot 站点 Cookie：{domain}")
+                    return cookie
+            except Exception as err:
+                logger.debug(f"PANDA 每日任务读取 MoviePilot 站点 Cookie 失败：{domain} - {err}")
+        return ""
+
+    def __request_text(self, url: str, cookie: str) -> str:
+        request = Request(url, headers=self.__headers(cookie))
         with urlopen(request, timeout=30) as response:
             return response.read().decode("utf-8", errors="replace")
 
-    def __post_action(self, action: str, params: dict[str, Any] = None) -> dict[str, Any]:
+    def __post_action(self, action: str, params: dict[str, Any] = None, cookie: str = "") -> dict[str, Any]:
         # PANDA 好友买卖接口统一通过 ajax.php + action 调用。
         params = params or {}
         body = {"action": action}
@@ -363,7 +399,7 @@ class PandaDaily(_PluginBase):
             body[f"params[{key}]"] = str(value)
 
         data = urlencode(body).encode("utf-8")
-        headers = self.__headers()
+        headers = self.__headers(cookie)
         headers.update({
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
             "X-Requested-With": "XMLHttpRequest",
@@ -376,9 +412,9 @@ class PandaDaily(_PluginBase):
         except json.JSONDecodeError:
             return {"ret": -1, "msg": "接口返回非 JSON", "raw": raw[:500]}
 
-    def __headers(self) -> dict[str, str]:
+    def __headers(self, cookie: str) -> dict[str, str]:
         return {
-            "Cookie": self._cookie,
+            "Cookie": cookie,
             "User-Agent": "Mozilla/5.0 MoviePilot PandaDaily",
             "Referer": self._friend_trade_url,
         }
@@ -433,6 +469,7 @@ class PandaDaily(_PluginBase):
             "onlyonce": self._onlyonce,
             "cron": self._cron,
             "delay": self._delay,
+            "site_domain": self._site_domain,
             "work_key": self._work_key,
             "interaction_key": self._interaction_key,
             "cookie": self._cookie,
