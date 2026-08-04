@@ -1,5 +1,6 @@
 import json
 import re
+import time
 import traceback
 from datetime import datetime, timedelta
 from html import unescape
@@ -28,7 +29,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -46,6 +47,8 @@ class PandaDaily(_PluginBase):
     _start_time: Optional[int] = None
     _end_time: Optional[int] = None
     _delay = 1.0
+    _retry_count = 2
+    _retry_interval = 60.0
     _work_key = "greeting"
     _interaction_key = "pat"
     _last_result = "尚未执行"
@@ -85,6 +88,8 @@ class PandaDaily(_PluginBase):
             self._site_domain = (config.get("site_domain") or "pandapt.net").strip()
             self._cron = (config.get("cron") or "").strip()
             self._delay = self.__float_value(config.get("delay"), 1.0)
+            self._retry_count = max(0, self.__int_value(config.get("retry_count"), 2))
+            self._retry_interval = max(0, self.__float_value(config.get("retry_interval"), 60.0))
             self._work_key = (config.get("work_key") or "greeting").strip()
             self._interaction_key = (config.get("interaction_key") or "pat").strip()
             self._last_result = config.get("last_result") or self._last_result
@@ -187,6 +192,39 @@ class PandaDaily(_PluginBase):
             {
                 "component": "VForm",
                 "content": [
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "retry_count",
+                                        "label": "失败重试次数",
+                                        "placeholder": "默认 2",
+                                        "type": "number",
+                                        "min": 0,
+                                    },
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "retry_interval",
+                                        "label": "重试间隔秒数",
+                                        "placeholder": "默认 60",
+                                        "type": "number",
+                                        "min": 0,
+                                    },
+                                }],
+                            },
+                        ],
+                    },
                     {
                         "component": "VRow",
                         "content": [
@@ -318,6 +356,7 @@ class PandaDaily(_PluginBase):
                                             "执行周期支持：1、5位cron表达式；2、配置间隔（小时），"
                                             "如2.3/9-23（9-23点之间每隔2.3小时执行一次）；"
                                             "3、周期不填默认9-23点随机执行1次。"
+                                            "任务失败后会按配置自动重试，默认重试2次、间隔60秒。"
                                         ),
                                     },
                                 }],
@@ -332,6 +371,8 @@ class PandaDaily(_PluginBase):
             "onlyonce": False,
             "cron": "",
             "delay": 1,
+            "retry_count": 2,
+            "retry_interval": 60,
             "site_domain": "pandapt.net",
             "work_key": "greeting",
             "interaction_key": "pat",
@@ -375,19 +416,30 @@ class PandaDaily(_PluginBase):
         logger.info("PANDA 每日任务开始执行")
         self._last_run_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        try:
-            result = self.__run()
-            self._last_result = result
-            logger.info(f"PANDA 每日任务执行完成：{result}")
-            if self._notify:
-                self.__notify("PANDA 每日任务完成", result)
-        except Exception as err:
-            self._last_result = f"执行失败：{err}"
-            logger.error(f"PANDA 每日任务执行失败：{err}\n{traceback.format_exc()}")
-            if self._notify:
-                self.__notify("PANDA 每日任务失败", self._last_result)
-        finally:
-            self.__update_config()
+        total_attempts = self._retry_count + 1
+        for attempt in range(1, total_attempts + 1):
+            try:
+                result = self.__run()
+                self._last_result = result
+                logger.info(f"PANDA 每日任务执行完成：{result}")
+                if self._notify:
+                    self.__notify("PANDA 每日任务完成", result)
+                break
+            except Exception as err:
+                if attempt < total_attempts:
+                    logger.warning(
+                        f"PANDA 每日任务第 {attempt} 次执行失败：{err}；"
+                        f"{self._retry_interval:g} 秒后进行第 {attempt + 1} 次尝试"
+                    )
+                    if self._retry_interval > 0:
+                        time.sleep(self._retry_interval)
+                    continue
+
+                self._last_result = f"执行失败（共尝试 {total_attempts} 次）：{err}"
+                logger.error(f"PANDA 每日任务最终执行失败：{err}\n{traceback.format_exc()}")
+                if self._notify:
+                    self.__notify("PANDA 每日任务失败", self._last_result)
+        self.__update_config()
 
     def __run(self) -> str:
         cookie = self.__resolve_cookie()
@@ -570,7 +622,6 @@ class PandaDaily(_PluginBase):
 
     def __sleep(self):
         if self._delay > 0:
-            import time
             time.sleep(self._delay)
 
     def __notify(self, title: str, text: str):
@@ -598,6 +649,8 @@ class PandaDaily(_PluginBase):
             "onlyonce": self._onlyonce,
             "cron": self._cron,
             "delay": self._delay,
+            "retry_count": self._retry_count,
+            "retry_interval": self._retry_interval,
             "site_domain": self._site_domain,
             "work_key": self._work_key,
             "interaction_key": self._interaction_key,
@@ -610,5 +663,12 @@ class PandaDaily(_PluginBase):
     def __float_value(value: Any, default: float) -> float:
         try:
             return float(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def __int_value(value: Any, default: int) -> int:
+        try:
+            return int(value)
         except Exception:
             return default
