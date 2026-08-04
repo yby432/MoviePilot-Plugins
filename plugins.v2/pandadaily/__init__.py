@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.db.site_oper import SiteOper
 from app.log import logger
 from app.plugins import _PluginBase
+from app.utils.timer import TimerUtils
 
 try:
     from app.schemas.types import NotificationType
@@ -27,7 +28,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -41,7 +42,9 @@ class PandaDaily(_PluginBase):
     _notify = True
     _cookie = ""
     _site_domain = "pandapt.net"
-    _cron = "0 7 * * *"
+    _cron = ""
+    _start_time: Optional[int] = None
+    _end_time: Optional[int] = None
     _delay = 1.0
     _work_key = "greeting"
     _interaction_key = "pat"
@@ -80,7 +83,7 @@ class PandaDaily(_PluginBase):
             self._notify = bool(config.get("notify", True))
             self._cookie = (config.get("cookie") or "").strip()
             self._site_domain = (config.get("site_domain") or "pandapt.net").strip()
-            self._cron = (config.get("cron") or "0 7 * * *").strip()
+            self._cron = (config.get("cron") or "").strip()
             self._delay = self.__float_value(config.get("delay"), 1.0)
             self._work_key = (config.get("work_key") or "greeting").strip()
             self._interaction_key = (config.get("interaction_key") or "pat").strip()
@@ -114,23 +117,69 @@ class PandaDaily(_PluginBase):
         return []
 
     def get_service(self) -> List[Dict[str, Any]]:
-        # MoviePilot 公共服务入口：启用后按 cron 定时调用 run_daily。
-        if not self._enabled:
-            return []
-        if not self._cron:
-            logger.warning("PANDA 每日任务未配置 cron，定时服务不启动")
-            return []
-        try:
-            return [{
-                "id": "PandaDaily",
-                "name": "PANDA 每日任务",
-                "trigger": CronTrigger.from_crontab(self._cron),
-                "func": self.run_daily,
-                "kwargs": {},
-            }]
-        except Exception as err:
-            logger.error(f"PANDA 每日任务 cron 配置错误：{err}")
-            return []
+        # MoviePilot 公共服务入口：执行周期格式对齐 AutoSignIn。
+        if self._enabled and self._cron:
+            try:
+                self._start_time = None
+                self._end_time = None
+                cron_text = str(self._cron).strip()
+                if cron_text.count(" ") == 4:
+                    return [{
+                        "id": "PandaDaily",
+                        "name": "PANDA 每日任务",
+                        "trigger": CronTrigger.from_crontab(cron_text),
+                        "func": self.run_daily,
+                        "kwargs": {},
+                    }]
+
+                crons = cron_text.split("/")
+                if len(crons) == 2:
+                    interval_hours = crons[0]
+                    times = crons[1].split("-")
+                    if len(times) == 2:
+                        self._start_time = int(times[0])
+                        self._end_time = int(times[1])
+                    if self._start_time is not None and self._end_time is not None:
+                        return [{
+                            "id": "PandaDaily",
+                            "name": "PANDA 每日任务",
+                            "trigger": "interval",
+                            "func": self.run_daily,
+                            "kwargs": {"hours": float(str(interval_hours).strip())},
+                        }]
+                    logger.error("PANDA 每日任务启动失败，执行周期格式错误")
+                else:
+                    return [{
+                        "id": "PandaDaily",
+                        "name": "PANDA 每日任务",
+                        "trigger": "interval",
+                        "func": self.run_daily,
+                        "kwargs": {"hours": float(cron_text)},
+                    }]
+            except Exception as err:
+                logger.error(f"PANDA 每日任务定时任务配置错误：{err}")
+        elif self._enabled:
+            triggers = TimerUtils.random_scheduler(
+                num_executions=1,
+                begin_hour=9,
+                end_hour=23,
+                max_interval=6 * 60,
+                min_interval=2 * 60,
+            )
+            ret_jobs = []
+            for trigger in triggers:
+                ret_jobs.append({
+                    "id": f"PandaDaily|{trigger.hour}:{trigger.minute}",
+                    "name": "PANDA 每日任务",
+                    "trigger": "cron",
+                    "func": self.run_daily,
+                    "kwargs": {
+                        "hour": trigger.hour,
+                        "minute": trigger.minute,
+                    },
+                })
+            return ret_jobs
+        return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         # 使用 MoviePilot 的 Vuetify JSON 表单配置，无需单独前端页面。
@@ -198,11 +247,11 @@ class PandaDaily(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 4},
                                 "content": [{
-                                    "component": "VCronField",
+                                    "component": "VTextField",
                                     "props": {
                                         "model": "cron",
                                         "label": "执行周期",
-                                        "placeholder": "默认 0 7 * * *",
+                                        "placeholder": "5位cron表达式，留空自动",
                                     },
                                 }],
                             },
@@ -265,7 +314,11 @@ class PandaDaily(_PluginBase):
                                     "props": {
                                         "type": "info",
                                         "variant": "tonal",
-                                        "text": "默认每天 07:00 执行；插件会优先读取 MoviePilot 站点里的 PANDA Cookie。工作和互动可在上方自由选择。",
+                                        "text": (
+                                            "执行周期支持：1、5位cron表达式；2、配置间隔（小时），"
+                                            "如2.3/9-23（9-23点之间每隔2.3小时执行一次）；"
+                                            "3、周期不填默认9-23点随机执行1次。"
+                                        ),
                                     },
                                 }],
                             },
@@ -277,7 +330,7 @@ class PandaDaily(_PluginBase):
             "enabled": False,
             "notify": True,
             "onlyonce": False,
-            "cron": "0 7 * * *",
+            "cron": "",
             "delay": 1,
             "site_domain": "pandapt.net",
             "work_key": "greeting",
@@ -311,6 +364,14 @@ class PandaDaily(_PluginBase):
 
     def run_daily(self):
         # 定时任务主入口：捕获所有异常并写入最近执行结果，避免后台服务崩溃。
+        if self._start_time is not None and self._end_time is not None:
+            current_hour = datetime.now().hour
+            if current_hour < self._start_time or current_hour > self._end_time:
+                logger.info(
+                    f"PANDA 每日任务当前时间 {current_hour} 不在 {self._start_time}-{self._end_time} 范围内，暂不执行"
+                )
+                return
+
         logger.info("PANDA 每日任务开始执行")
         self._last_run_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
