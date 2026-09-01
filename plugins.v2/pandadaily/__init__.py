@@ -4,6 +4,7 @@ import time
 import traceback
 from datetime import datetime, timedelta
 from html import unescape
+from itertools import combinations
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -29,7 +30,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。"
     plugin_icon = "signin.png"
-    plugin_version = "1.0.5"
+    plugin_version = "1.1.0"
     plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -49,6 +50,7 @@ class PandaDaily(_PluginBase):
     _delay = 1.0
     _retry_count = 2
     _retry_interval = 60.0
+    _office_enabled = True
     _work_key = "greeting"
     _interaction_key = "pat"
     _last_result = "尚未执行"
@@ -66,6 +68,12 @@ class PandaDaily(_PluginBase):
         {"title": "洗头按摩", "value": "hair_massage"},
         {"title": "贴身照料", "value": "close_care"},
         {"title": "护主值守", "value": "guard"},
+        {"title": "理财看账", "value": "accounting"},
+        {"title": "私密差遣", "value": "private_task"},
+        {"title": "外联应酬", "value": "social"},
+        {"title": "大保健", "value": "special_care"},
+        {"title": "暖侍加班", "value": "overtime"},
+        {"title": "默契协作", "value": "tacit_cooperation"},
     ]
     _interaction_options = [
         {"title": "夸夸", "value": "praise"},
@@ -90,6 +98,7 @@ class PandaDaily(_PluginBase):
             self._delay = self.__float_value(config.get("delay"), 1.0)
             self._retry_count = max(0, self.__int_value(config.get("retry_count"), 2))
             self._retry_interval = max(0, self.__float_value(config.get("retry_interval"), 60.0))
+            self._office_enabled = bool(config.get("office_enabled", True))
             self._work_key = (config.get("work_key") or "greeting").strip()
             self._interaction_key = (config.get("interaction_key") or "pat").strip()
             self._last_result = config.get("last_result") or self._last_result
@@ -256,6 +265,14 @@ class PandaDaily(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 3},
                                 "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "office_enabled", "label": "自动派遣事务所"},
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
                                     "component": "VTextField",
                                     "props": {
                                         "model": "delay",
@@ -357,6 +374,7 @@ class PandaDaily(_PluginBase):
                                             "如2.3/9-23（9-23点之间每隔2.3小时执行一次）；"
                                             "3、周期不填默认9-23点随机执行1次。"
                                             "任务失败后会按配置自动重试，默认重试2次、间隔60秒。"
+                                            "开启自动派遣后会领取已完成委托，并按收益和属性匹配自动组队。"
                                         ),
                                     },
                                 }],
@@ -373,6 +391,7 @@ class PandaDaily(_PluginBase):
             "delay": 1,
             "retry_count": 2,
             "retry_interval": 60,
+            "office_enabled": True,
             "site_domain": "pandapt.net",
             "work_key": "greeting",
             "interaction_key": "pat",
@@ -504,13 +523,115 @@ class PandaDaily(_PluginBase):
             or (income_response.get("data") or {}).get("amount")
             or "0"
         )
+        office_result = self.__run_office(cookie) if self._office_enabled else "事务所未启用"
 
         return (
             f"佣人 {len(assets)} 个；安排工作「{work_label}」完成 {work_done} 个，"
             f"不支持 {work_unavailable} 个，跳过 {work_skip} 个；"
             f"互动「{interaction_label}」完成 {interact_done} 个，跳过 {interact_skip} 个；"
-            f"领取收益 +{claimed_amount} 魔力"
+            f"领取收益 +{claimed_amount} 魔力；{office_result}"
         )
+
+    def __run_office(self, cookie: str) -> str:
+        board = self.__office_board(cookie)
+        if not board.get("unlocked"):
+            return f"事务所未解锁（Lv.{board.get('unlock_level') or '?'}）"
+
+        settled = 0
+        for run in board.get("running") or []:
+            if not self.__office_run_ready(run, board.get("server_time")):
+                continue
+            response = self.__post_action(
+                "friendTradeCommissionSettle", {"run_id": run.get("id")}, cookie
+            )
+            self.__ensure_ok(response, f"领取事务所委托 {run.get('id')}")
+            settled += 1
+            self.__sleep()
+
+        if settled:
+            board = self.__office_board(cookie)
+
+        dispatched = []
+        while len(board.get("running") or []) < int(board.get("parallel_limit") or 0):
+            choice = self.__select_office_dispatch(board)
+            if not choice:
+                break
+            offer, members = choice
+            response = self.__post_action("friendTradeCommissionStart", {
+                "offer_id": offer.get("id"),
+                "relationship_ids": json.dumps(
+                    [member.get("relationship_id") for member in members],
+                    ensure_ascii=False,
+                ),
+            }, cookie)
+            offer_name = (offer.get("offer_snapshot_text") or {}).get("name") or offer.get("name") or "未知委托"
+            self.__ensure_ok(response, f"派遣事务所委托 {offer_name}")
+            dispatched.append(
+                f"{offer_name}（{', '.join(str(member.get('username')) for member in members)}）"
+            )
+            self.__sleep()
+            board = self.__office_board(cookie)
+
+        dispatch_text = "、".join(dispatched) if dispatched else "暂无可派遣栏位或队员"
+        return f"事务所领取 {settled} 项，派遣 {len(dispatched)} 项：{dispatch_text}"
+
+    def __office_board(self, cookie: str) -> dict[str, Any]:
+        response = self.__post_action("friendTradeCommissionBoard", cookie=cookie)
+        self.__ensure_ok(response, "读取事务所")
+        data = response.get("data") or {}
+        if not isinstance(data, dict):
+            raise RuntimeError("事务所返回数据格式错误")
+        return data
+
+    @staticmethod
+    def __office_run_ready(run: dict[str, Any], server_time: Any) -> bool:
+        if run.get("status") in {"ready", "completed", "finished"}:
+            return True
+        ends_at = run.get("ends_at")
+        if not ends_at or not server_time:
+            return False
+        try:
+            return datetime.fromisoformat(str(ends_at)) <= datetime.fromisoformat(str(server_time))
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def __select_office_dispatch(
+        board: dict[str, Any],
+    ) -> Optional[Tuple[dict[str, Any], Tuple[dict[str, Any], ...]]]:
+        offers = [offer for offer in board.get("offers") or [] if not offer.get("is_started")]
+        members = [member for member in board.get("eligible_members") or [] if member.get("can_dispatch")]
+        team_limit = int(board.get("team_size_limit") or 0)
+        if not offers or not members or team_limit < 1:
+            return None
+
+        offers.sort(
+            key=lambda offer: (
+                float((offer.get("offer_snapshot_text") or {}).get("base_exp") or 0),
+                float((offer.get("offer_snapshot_text") or {}).get("base_bonus") or 0),
+            ),
+            reverse=True,
+        )
+        offer = offers[0]
+        snapshot = offer.get("offer_snapshot_text") or {}
+        team_size = min(
+            max(1, int(snapshot.get("recommended_team_size") or 1)),
+            team_limit,
+            len(members),
+        )
+        targets = snapshot.get("focus_targets") or {}
+
+        def team_score(team: Tuple[dict[str, Any], ...]) -> float:
+            score = 0.0
+            for attribute, target in targets.items():
+                best = max(
+                    float(((member.get("trait_summary") or {}).get("attributes") or {}).get(attribute) or 0)
+                    for member in team
+                )
+                score += min(best / max(float(target), 1.0), 1.0)
+            return score
+
+        return offer, max(combinations(members, team_size), key=team_score)
 
     def __resolve_cookie(self) -> str:
         site_cookie = self.__site_cookie()
@@ -566,10 +687,14 @@ class PandaDaily(_PluginBase):
 
     @staticmethod
     def __extract_assets(page_html: str) -> list[dict[str, Any]]:
-        # 页面把初始数据写在 new Vue({...}) 中。不同环境返回的 HTML 换行可能不同，
-        # 所以这里只定位 home: 后面的对象，再用括号配对提取完整 JSON。
+        # 新版页面把数据传给 normalizeFriendTradeHome({...})，旧版则直接写在 home: {...}。
+        # 两种结构都通过括号配对提取 JSON，避免依赖换行和空格格式。
         script = unescape(page_html)
-        home_key = re.search(r"\bhome\s*:\s*\{", script)
+        bootstrap_key = re.search(
+            r"\bfriendTradeBootstrapHome\s*=\s*normalizeFriendTradeHome\s*\(\s*\{",
+            script,
+        )
+        home_key = bootstrap_key or re.search(r"\bhome\s*:\s*\{", script)
         if not home_key:
             if "login.php" in script or "logout.php" not in script:
                 raise RuntimeError("未找到登录后的好友买卖数据，请检查 MoviePilot 站点 Cookie 是否有效")
@@ -580,7 +705,10 @@ class PandaDaily(_PluginBase):
         if object_end < 0:
             raise RuntimeError("无法解析好友买卖页面数据")
 
-        home = json.loads(script[object_start:object_end + 1])
+        try:
+            home = json.loads(script[object_start:object_end + 1])
+        except json.JSONDecodeError as err:
+            raise RuntimeError(f"好友买卖页面数据不是有效 JSON：{err}") from err
         return home.get("my_assets") or []
 
     @staticmethod
@@ -651,6 +779,7 @@ class PandaDaily(_PluginBase):
             "delay": self._delay,
             "retry_count": self._retry_count,
             "retry_interval": self._retry_interval,
+            "office_enabled": self._office_enabled,
             "site_domain": self._site_domain,
             "work_key": self._work_key,
             "interaction_key": self._interaction_key,
