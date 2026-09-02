@@ -5,6 +5,7 @@ import traceback
 from datetime import datetime, timedelta
 from html import unescape
 from itertools import combinations
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -30,7 +31,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。"
     plugin_icon = "signin.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -51,10 +52,13 @@ class PandaDaily(_PluginBase):
     _retry_count = 2
     _retry_interval = 60.0
     _office_enabled = True
+    _office_duration = 6
+    _operation_lock = Lock()
     _work_key = "greeting"
     _interaction_key = "pat"
     _last_result = "尚未执行"
     _last_run_at = ""
+    _last_daily_date = ""
 
     _friend_trade_url = "https://pandapt.net/friend-trade.php"
     _ajax_url = "https://pandapt.net/ajax.php"
@@ -83,6 +87,11 @@ class PandaDaily(_PluginBase):
         {"title": "小奖励", "value": "reward"},
         {"title": "深入交流", "value": "deep_communication"},
     ]
+    _office_duration_options = [
+        {"title": "6 小时", "value": 6},
+        {"title": "12 小时", "value": 12},
+        {"title": "18 小时", "value": 18},
+    ]
 
     def init_plugin(self, config: dict = None):
         # 配置变更时先停止旧的一次性调度器，避免重复触发。
@@ -99,10 +108,12 @@ class PandaDaily(_PluginBase):
             self._retry_count = max(0, self.__int_value(config.get("retry_count"), 2))
             self._retry_interval = max(0, self.__float_value(config.get("retry_interval"), 60.0))
             self._office_enabled = bool(config.get("office_enabled", True))
+            self._office_duration = max(1, self.__int_value(config.get("office_duration"), 6))
             self._work_key = (config.get("work_key") or "greeting").strip()
             self._interaction_key = (config.get("interaction_key") or "pat").strip()
             self._last_result = config.get("last_result") or self._last_result
             self._last_run_at = config.get("last_run_at") or self._last_run_at
+            self._last_daily_date = config.get("last_daily_date") or self._last_daily_date
 
         if self._onlyonce:
             # “立即运行一次”通过独立 BackgroundScheduler 延迟 3 秒执行，
@@ -132,44 +143,47 @@ class PandaDaily(_PluginBase):
 
     def get_service(self) -> List[Dict[str, Any]]:
         # MoviePilot 公共服务入口：执行周期格式对齐 AutoSignIn。
+        jobs = []
         if self._enabled and self._cron:
             try:
                 self._start_time = None
                 self._end_time = None
                 cron_text = str(self._cron).strip()
                 if cron_text.count(" ") == 4:
-                    return [{
+                    jobs.append({
                         "id": "PandaDaily",
                         "name": "PANDA 每日任务",
                         "trigger": CronTrigger.from_crontab(cron_text),
                         "func": self.run_daily,
                         "kwargs": {},
-                    }]
+                    })
 
-                crons = cron_text.split("/")
-                if len(crons) == 2:
-                    interval_hours = crons[0]
-                    times = crons[1].split("-")
-                    if len(times) == 2:
-                        self._start_time = int(times[0])
-                        self._end_time = int(times[1])
-                    if self._start_time is not None and self._end_time is not None:
-                        return [{
+                else:
+                    crons = cron_text.split("/")
+                    if len(crons) == 2:
+                        interval_hours = crons[0]
+                        times = crons[1].split("-")
+                        if len(times) == 2:
+                            self._start_time = int(times[0])
+                            self._end_time = int(times[1])
+                        if self._start_time is not None and self._end_time is not None:
+                            jobs.append({
+                                "id": "PandaDaily",
+                                "name": "PANDA 每日任务",
+                                "trigger": "interval",
+                                "func": self.run_daily,
+                                "kwargs": {"hours": float(str(interval_hours).strip())},
+                            })
+                        else:
+                            logger.error("PANDA 每日任务启动失败，执行周期格式错误")
+                    else:
+                        jobs.append({
                             "id": "PandaDaily",
                             "name": "PANDA 每日任务",
                             "trigger": "interval",
                             "func": self.run_daily,
-                            "kwargs": {"hours": float(str(interval_hours).strip())},
-                        }]
-                    logger.error("PANDA 每日任务启动失败，执行周期格式错误")
-                else:
-                    return [{
-                        "id": "PandaDaily",
-                        "name": "PANDA 每日任务",
-                        "trigger": "interval",
-                        "func": self.run_daily,
-                        "kwargs": {"hours": float(cron_text)},
-                    }]
+                            "kwargs": {"hours": float(cron_text)},
+                        })
             except Exception as err:
                 logger.error(f"PANDA 每日任务定时任务配置错误：{err}")
         elif self._enabled:
@@ -180,9 +194,8 @@ class PandaDaily(_PluginBase):
                 max_interval=6 * 60,
                 min_interval=2 * 60,
             )
-            ret_jobs = []
             for trigger in triggers:
-                ret_jobs.append({
+                jobs.append({
                     "id": f"PandaDaily|{trigger.hour}:{trigger.minute}",
                     "name": "PANDA 每日任务",
                     "trigger": "cron",
@@ -192,8 +205,15 @@ class PandaDaily(_PluginBase):
                         "minute": trigger.minute,
                     },
                 })
-            return ret_jobs
-        return []
+        if self._enabled and self._office_enabled:
+            jobs.append({
+                "id": "PandaDailyOffice",
+                "name": "PANDA 事务所到期巡检",
+                "trigger": "interval",
+                "func": self.run_office_cycle,
+                "kwargs": {"minutes": 5},
+            })
+        return jobs
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         # 使用 MoviePilot 的 Vuetify JSON 表单配置，无需单独前端页面。
@@ -215,6 +235,20 @@ class PandaDaily(_PluginBase):
                                         "placeholder": "默认 2",
                                         "type": "number",
                                         "min": 0,
+                                    },
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "office_duration",
+                                        "label": "事务所派遣时长",
+                                        "items": self._office_duration_options,
+                                        "item-title": "title",
+                                        "item-value": "value",
                                     },
                                 }],
                             },
@@ -375,6 +409,7 @@ class PandaDaily(_PluginBase):
                                             "3、周期不填默认9-23点随机执行1次。"
                                             "任务失败后会按配置自动重试，默认重试2次、间隔60秒。"
                                             "开启自动派遣后会领取已完成委托，并按收益和属性匹配自动组队。"
+                                            "事务所每5分钟检查到期委托，续派时不会重复执行工作和互动。"
                                         ),
                                     },
                                 }],
@@ -392,12 +427,14 @@ class PandaDaily(_PluginBase):
             "retry_count": 2,
             "retry_interval": 60,
             "office_enabled": True,
+            "office_duration": 6,
             "site_domain": "pandapt.net",
             "work_key": "greeting",
             "interaction_key": "pat",
             "cookie": "",
             "last_result": "",
             "last_run_at": "",
+            "last_daily_date": "",
         }
 
     def get_page(self) -> List[dict]:
@@ -423,6 +460,15 @@ class PandaDaily(_PluginBase):
             self._scheduler = None
 
     def run_daily(self):
+        if not self._operation_lock.acquire(blocking=False):
+            logger.info("PANDA 每日任务已有任务执行中，本次跳过")
+            return
+        try:
+            self.__run_daily_locked()
+        finally:
+            self._operation_lock.release()
+
+    def __run_daily_locked(self):
         # 定时任务主入口：捕获所有异常并写入最近执行结果，避免后台服务崩溃。
         if self._start_time is not None and self._end_time is not None:
             current_hour = datetime.now().hour
@@ -464,6 +510,8 @@ class PandaDaily(_PluginBase):
         cookie = self.__resolve_cookie()
         if not cookie:
             raise RuntimeError("未配置 Cookie")
+
+        office_settled = self.__settle_office(cookie) if self._office_enabled else 0
 
         # 先读取好友买卖首页，从页面内联 Vue 数据中解析佣人列表与今日状态。
         page = self.__request_text(self._friend_trade_url, cookie)
@@ -523,7 +571,13 @@ class PandaDaily(_PluginBase):
             or (income_response.get("data") or {}).get("amount")
             or "0"
         )
-        office_result = self.__run_office(cookie) if self._office_enabled else "事务所未启用"
+        self._last_daily_date = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d")
+        office_dispatched = self.__dispatch_office(cookie) if self._office_enabled else []
+        office_result = (
+            f"事务所领取 {office_settled} 项，派遣 {len(office_dispatched)} 项"
+            + (f"：{'、'.join(office_dispatched)}" if office_dispatched else "")
+            if self._office_enabled else "事务所未启用"
+        )
 
         return (
             f"佣人 {len(assets)} 个；安排工作「{work_label}」完成 {work_done} 个，"
@@ -532,10 +586,30 @@ class PandaDaily(_PluginBase):
             f"领取收益 +{claimed_amount} 魔力；{office_result}"
         )
 
-    def __run_office(self, cookie: str) -> str:
+    def run_office_cycle(self):
+        if not self._operation_lock.acquire(blocking=False):
+            logger.debug("PANDA 事务所已有任务执行中，本次巡检跳过")
+            return
+        try:
+            cookie = self.__resolve_cookie()
+            if not cookie:
+                raise RuntimeError("未配置 Cookie")
+            settled = self.__settle_office(cookie)
+            dispatched = self.__dispatch_office(cookie, require_daily_completion=True)
+            if settled or dispatched:
+                logger.info(
+                    f"PANDA 事务所巡检完成：领取 {settled} 项，派遣 {len(dispatched)} 项"
+                    + (f"：{'、'.join(dispatched)}" if dispatched else "")
+                )
+        except Exception as err:
+            logger.error(f"PANDA 事务所巡检失败：{err}\n{traceback.format_exc()}")
+        finally:
+            self._operation_lock.release()
+
+    def __settle_office(self, cookie: str) -> int:
         board = self.__office_board(cookie)
         if not board.get("unlocked"):
-            return f"事务所未解锁（Lv.{board.get('unlock_level') or '?'}）"
+            return 0
 
         settled = 0
         for run in board.get("running") or []:
@@ -547,13 +621,21 @@ class PandaDaily(_PluginBase):
             self.__ensure_ok(response, f"领取事务所委托 {run.get('id')}")
             settled += 1
             self.__sleep()
+        return settled
 
-        if settled:
-            board = self.__office_board(cookie)
-
+    def __dispatch_office(self, cookie: str, require_daily_completion: bool = False) -> List[str]:
+        board = self.__office_board(cookie)
+        if not board.get("unlocked"):
+            return []
+        board_date = str(board.get("board_date") or "")
+        if require_daily_completion and self._last_daily_date != board_date:
+            logger.info(
+                f"PANDA 事务所等待 {board_date or '今日'} 的工作和互动完成后再派遣"
+            )
+            return []
         dispatched = []
         while len(board.get("running") or []) < int(board.get("parallel_limit") or 0):
-            choice = self.__select_office_dispatch(board)
+            choice = self.__select_office_dispatch(board, self._office_duration)
             if not choice:
                 break
             offer, members = choice
@@ -572,8 +654,7 @@ class PandaDaily(_PluginBase):
             self.__sleep()
             board = self.__office_board(cookie)
 
-        dispatch_text = "、".join(dispatched) if dispatched else "暂无可派遣栏位或队员"
-        return f"事务所领取 {settled} 项，派遣 {len(dispatched)} 项：{dispatch_text}"
+        return dispatched
 
     def __office_board(self, cookie: str) -> dict[str, Any]:
         response = self.__post_action("friendTradeCommissionBoard", cookie=cookie)
@@ -597,9 +678,13 @@ class PandaDaily(_PluginBase):
 
     @staticmethod
     def __select_office_dispatch(
-        board: dict[str, Any],
+        board: dict[str, Any], duration_hours: int,
     ) -> Optional[Tuple[dict[str, Any], Tuple[dict[str, Any], ...]]]:
-        offers = [offer for offer in board.get("offers") or [] if not offer.get("is_started")]
+        offers = [
+            offer for offer in board.get("offers") or []
+            if not offer.get("is_started")
+            and int((offer.get("offer_snapshot_text") or {}).get("duration_hours") or 0) == duration_hours
+        ]
         members = [member for member in board.get("eligible_members") or [] if member.get("can_dispatch")]
         team_limit = int(board.get("team_size_limit") or 0)
         if not offers or not members or team_limit < 1:
@@ -780,12 +865,14 @@ class PandaDaily(_PluginBase):
             "retry_count": self._retry_count,
             "retry_interval": self._retry_interval,
             "office_enabled": self._office_enabled,
+            "office_duration": self._office_duration,
             "site_domain": self._site_domain,
             "work_key": self._work_key,
             "interaction_key": self._interaction_key,
             "cookie": self._cookie,
             "last_result": self._last_result,
             "last_run_at": self._last_run_at,
+            "last_daily_date": self._last_daily_date,
         })
 
     @staticmethod
