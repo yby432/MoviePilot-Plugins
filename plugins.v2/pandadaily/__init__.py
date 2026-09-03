@@ -31,7 +31,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。"
     plugin_icon = "signin.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.2"
     plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -59,6 +59,7 @@ class PandaDaily(_PluginBase):
     _last_result = "尚未执行"
     _last_run_at = ""
     _last_daily_date = ""
+    _office_next_run_at = ""
 
     _friend_trade_url = "https://pandapt.net/friend-trade.php"
     _ajax_url = "https://pandapt.net/ajax.php"
@@ -114,6 +115,7 @@ class PandaDaily(_PluginBase):
             self._last_result = config.get("last_result") or self._last_result
             self._last_run_at = config.get("last_run_at") or self._last_run_at
             self._last_daily_date = config.get("last_daily_date") or self._last_daily_date
+            self._office_next_run_at = config.get("office_next_run_at") or ""
 
         if self._onlyonce:
             # “立即运行一次”通过独立 BackgroundScheduler 延迟 3 秒执行，
@@ -130,6 +132,9 @@ class PandaDaily(_PluginBase):
             if self._scheduler.get_jobs():
                 self._scheduler.print_jobs()
                 self._scheduler.start()
+
+        if self._enabled and self._office_enabled and self._office_next_run_at:
+            self.__schedule_office_cycle(self._office_next_run_at)
 
     def get_state(self) -> bool:
         return self._enabled
@@ -205,14 +210,6 @@ class PandaDaily(_PluginBase):
                         "minute": trigger.minute,
                     },
                 })
-        if self._enabled and self._office_enabled:
-            jobs.append({
-                "id": "PandaDailyOffice",
-                "name": "PANDA 事务所到期巡检",
-                "trigger": "interval",
-                "func": self.run_office_cycle,
-                "kwargs": {"minutes": 5},
-            })
         return jobs
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -409,7 +406,8 @@ class PandaDaily(_PluginBase):
                                             "3、周期不填默认9-23点随机执行1次。"
                                             "任务失败后会按配置自动重试，默认重试2次、间隔60秒。"
                                             "开启自动派遣后会领取已完成委托，并按收益和属性匹配自动组队。"
-                                            "事务所每5分钟检查到期委托，续派时不会重复执行工作和互动。"
+                                            "事务所会在派遣时长结束2分钟后自动领取并续派，"
+                                            "不会重复执行工作和互动。"
                                         ),
                                     },
                                 }],
@@ -435,6 +433,7 @@ class PandaDaily(_PluginBase):
             "last_result": "",
             "last_run_at": "",
             "last_daily_date": "",
+            "office_next_run_at": "",
         }
 
     def get_page(self) -> List[dict]:
@@ -461,7 +460,8 @@ class PandaDaily(_PluginBase):
 
     def run_daily(self):
         if not self._operation_lock.acquire(blocking=False):
-            logger.info("PANDA 每日任务已有任务执行中，本次跳过")
+            logger.info("PANDA 每日任务与其他任务冲突，2分钟后补跑")
+            self.__schedule_daily_retry()
             return
         try:
             self.__run_daily_locked()
@@ -588,7 +588,10 @@ class PandaDaily(_PluginBase):
 
     def run_office_cycle(self):
         if not self._operation_lock.acquire(blocking=False):
-            logger.debug("PANDA 事务所已有任务执行中，本次巡检跳过")
+            logger.info("PANDA 事务所与每日任务冲突，2分钟后补跑")
+            self.__schedule_office_cycle(
+                datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=2)
+            )
             return
         try:
             cookie = self.__resolve_cookie()
@@ -598,11 +601,14 @@ class PandaDaily(_PluginBase):
             dispatched = self.__dispatch_office(cookie, require_daily_completion=True)
             if settled or dispatched:
                 logger.info(
-                    f"PANDA 事务所巡检完成：领取 {settled} 项，派遣 {len(dispatched)} 项"
+                    f"PANDA 事务所到期任务完成：领取 {settled} 项，派遣 {len(dispatched)} 项"
                     + (f"：{'、'.join(dispatched)}" if dispatched else "")
                 )
         except Exception as err:
-            logger.error(f"PANDA 事务所巡检失败：{err}\n{traceback.format_exc()}")
+            logger.error(f"PANDA 事务所到期任务失败：{err}\n{traceback.format_exc()}")
+            self.__schedule_office_cycle(
+                datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=2)
+            )
         finally:
             self._operation_lock.release()
 
@@ -654,7 +660,62 @@ class PandaDaily(_PluginBase):
             self.__sleep()
             board = self.__office_board(cookie)
 
+        if dispatched:
+            self.__schedule_office_cycle(
+                datetime.now(tz=pytz.timezone(settings.TZ))
+                + timedelta(hours=self._office_duration, minutes=2)
+            )
+
         return dispatched
+
+    def __schedule_office_cycle(self, run_at: Any):
+        timezone = pytz.timezone(settings.TZ)
+        if isinstance(run_at, str):
+            try:
+                run_at = datetime.fromisoformat(run_at)
+            except ValueError:
+                logger.warning(f"PANDA 事务所下次执行时间无效：{run_at}")
+                self._office_next_run_at = ""
+                self.__update_config()
+                return
+        if run_at.tzinfo is None:
+            run_at = timezone.localize(run_at)
+        else:
+            run_at = run_at.astimezone(timezone)
+        now = datetime.now(tz=timezone)
+        if run_at <= now:
+            run_at = now + timedelta(seconds=3)
+
+        if not self._scheduler:
+            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+        self._scheduler.add_job(
+            func=self.run_office_cycle,
+            trigger="date",
+            run_date=run_at,
+            id="PandaDailyOffice",
+            name="PANDA 事务所到期续派",
+            replace_existing=True,
+        )
+        if not self._scheduler.running:
+            self._scheduler.start()
+        self._office_next_run_at = run_at.isoformat()
+        self.__update_config()
+        logger.info(f"PANDA 事务所下次续派时间：{run_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    def __schedule_daily_retry(self):
+        run_at = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(minutes=2)
+        if not self._scheduler:
+            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+        self._scheduler.add_job(
+            func=self.run_daily,
+            trigger="date",
+            run_date=run_at,
+            id="PandaDailyRetry",
+            name="PANDA 每日任务冲突补跑",
+            replace_existing=True,
+        )
+        if not self._scheduler.running:
+            self._scheduler.start()
 
     def __office_board(self, cookie: str) -> dict[str, Any]:
         response = self.__post_action("friendTradeCommissionBoard", cookie=cookie)
@@ -873,6 +934,7 @@ class PandaDaily(_PluginBase):
             "last_result": self._last_result,
             "last_run_at": self._last_run_at,
             "last_daily_date": self._last_daily_date,
+            "office_next_run_at": self._office_next_run_at,
         })
 
     @staticmethod
