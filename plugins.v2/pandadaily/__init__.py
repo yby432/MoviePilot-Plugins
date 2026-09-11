@@ -31,7 +31,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。"
     plugin_icon = "signin.png"
-    plugin_version = "1.2.2"
+    plugin_version = "1.4.0"
     plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -52,6 +52,7 @@ class PandaDaily(_PluginBase):
     _retry_count = 2
     _retry_interval = 60.0
     _office_enabled = True
+    _office_smart = True
     _office_duration = 6
     _operation_lock = Lock()
     _work_key = "greeting"
@@ -92,6 +93,7 @@ class PandaDaily(_PluginBase):
         {"title": "6 小时", "value": 6},
         {"title": "12 小时", "value": 12},
         {"title": "18 小时", "value": 18},
+        {"title": "24 小时", "value": 24},
     ]
 
     def init_plugin(self, config: dict = None):
@@ -109,6 +111,7 @@ class PandaDaily(_PluginBase):
             self._retry_count = max(0, self.__int_value(config.get("retry_count"), 2))
             self._retry_interval = max(0, self.__float_value(config.get("retry_interval"), 60.0))
             self._office_enabled = bool(config.get("office_enabled", True))
+            self._office_smart = bool(config.get("office_smart", True))
             self._office_duration = max(1, self.__int_value(config.get("office_duration"), 6))
             self._work_key = (config.get("work_key") or "greeting").strip()
             self._interaction_key = (config.get("interaction_key") or "pat").strip()
@@ -133,8 +136,11 @@ class PandaDaily(_PluginBase):
                 self._scheduler.print_jobs()
                 self._scheduler.start()
 
-        if self._enabled and self._office_enabled and self._office_next_run_at:
-            self.__schedule_office_cycle(self._office_next_run_at)
+        if self._enabled and self._office_enabled:
+            self.__schedule_office_cycle(
+                self._office_next_run_at
+                or datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3)
+            )
 
     def get_state(self) -> bool:
         return self._enabled
@@ -239,10 +245,21 @@ class PandaDaily(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 3},
                                 "content": [{
+                                    "component": "VSwitch",
+                                    "props": {
+                                        "model": "office_smart",
+                                        "label": "事务所智能分配",
+                                    },
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
                                     "component": "VSelect",
                                     "props": {
                                         "model": "office_duration",
-                                        "label": "事务所派遣时长",
+                                        "label": "固定派遣时长（关闭智能时）",
                                         "items": self._office_duration_options,
                                         "item-title": "title",
                                         "item-value": "value",
@@ -405,9 +422,11 @@ class PandaDaily(_PluginBase):
                                             "如2.3/9-23（9-23点之间每隔2.3小时执行一次）；"
                                             "3、周期不填默认9-23点随机执行1次。"
                                             "任务失败后会按配置自动重试，默认重试2次、间隔60秒。"
-                                            "开启自动派遣后会领取已完成委托，并按收益和属性匹配自动组队。"
+                                            "每日工作、互动和收益与事务所独立运行。"
+                                            "开启智能分配后会同时规划所有空闲栏位，优先填满栏位，"
+                                            "再按属性匹配度和单位时间收益自动组队。"
                                             "事务所会在派遣时长结束2分钟后自动领取并续派，"
-                                            "不会重复执行工作和互动。"
+                                            "支持6、12、18、24小时。"
                                         ),
                                     },
                                 }],
@@ -425,6 +444,7 @@ class PandaDaily(_PluginBase):
             "retry_count": 2,
             "retry_interval": 60,
             "office_enabled": True,
+            "office_smart": True,
             "office_duration": 6,
             "site_domain": "pandapt.net",
             "work_key": "greeting",
@@ -511,8 +531,6 @@ class PandaDaily(_PluginBase):
         if not cookie:
             raise RuntimeError("未配置 Cookie")
 
-        office_settled = self.__settle_office(cookie) if self._office_enabled else 0
-
         # 先读取好友买卖首页，从页面内联 Vue 数据中解析佣人列表与今日状态。
         page = self.__request_text(self._friend_trade_url, cookie)
         assets = self.__extract_assets(page)
@@ -572,18 +590,11 @@ class PandaDaily(_PluginBase):
             or "0"
         )
         self._last_daily_date = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d")
-        office_dispatched = self.__dispatch_office(cookie) if self._office_enabled else []
-        office_result = (
-            f"事务所领取 {office_settled} 项，派遣 {len(office_dispatched)} 项"
-            + (f"：{'、'.join(office_dispatched)}" if office_dispatched else "")
-            if self._office_enabled else "事务所未启用"
-        )
-
         return (
             f"佣人 {len(assets)} 个；安排工作「{work_label}」完成 {work_done} 个，"
             f"不支持 {work_unavailable} 个，跳过 {work_skip} 个；"
             f"互动「{interaction_label}」完成 {interact_done} 个，跳过 {interact_skip} 个；"
-            f"领取收益 +{claimed_amount} 魔力；{office_result}"
+            f"领取收益 +{claimed_amount} 魔力"
         )
 
     def run_office_cycle(self):
@@ -598,7 +609,7 @@ class PandaDaily(_PluginBase):
             if not cookie:
                 raise RuntimeError("未配置 Cookie")
             settled = self.__settle_office(cookie)
-            dispatched = self.__dispatch_office(cookie, require_daily_completion=True)
+            dispatched = self.__dispatch_office(cookie)
             if settled or dispatched:
                 logger.info(
                     f"PANDA 事务所到期任务完成：领取 {settled} 项，派遣 {len(dispatched)} 项"
@@ -629,19 +640,15 @@ class PandaDaily(_PluginBase):
             self.__sleep()
         return settled
 
-    def __dispatch_office(self, cookie: str, require_daily_completion: bool = False) -> List[str]:
+    def __dispatch_office(self, cookie: str) -> List[str]:
         board = self.__office_board(cookie)
         if not board.get("unlocked"):
             return []
-        board_date = str(board.get("board_date") or "")
-        if require_daily_completion and self._last_daily_date != board_date:
-            logger.info(
-                f"PANDA 事务所等待 {board_date or '今日'} 的工作和互动完成后再派遣"
-            )
-            return []
         dispatched = []
         while len(board.get("running") or []) < int(board.get("parallel_limit") or 0):
-            choice = self.__select_office_dispatch(board, self._office_duration)
+            choice = self.__select_office_dispatch(
+                board, None if self._office_smart else self._office_duration
+            )
             if not choice:
                 break
             offer, members = choice
@@ -660,13 +667,39 @@ class PandaDaily(_PluginBase):
             self.__sleep()
             board = self.__office_board(cookie)
 
-        if dispatched:
-            self.__schedule_office_cycle(
-                datetime.now(tz=pytz.timezone(settings.TZ))
-                + timedelta(hours=self._office_duration, minutes=2)
-            )
+        if not self.__schedule_next_office_from_board(board):
+            now = datetime.now(tz=pytz.timezone(settings.TZ))
+            if dispatched:
+                self.__schedule_office_cycle(
+                    now + timedelta(hours=self._office_duration, minutes=2)
+                )
+            else:
+                self.__schedule_office_cycle(
+                    (now + timedelta(days=1)).replace(
+                        hour=0, minute=2, second=0, microsecond=0
+                    )
+                )
 
         return dispatched
+
+    def __schedule_next_office_from_board(self, board: dict[str, Any]) -> bool:
+        timezone = pytz.timezone(settings.TZ)
+        end_times = []
+        for run in board.get("running") or []:
+            ends_at = run.get("ends_at")
+            if not ends_at:
+                continue
+            try:
+                parsed = datetime.fromisoformat(str(ends_at))
+                if parsed.tzinfo is None:
+                    parsed = timezone.localize(parsed)
+                end_times.append(parsed.astimezone(timezone))
+            except (TypeError, ValueError):
+                logger.warning(f"PANDA 事务所委托结束时间无效：{ends_at}")
+        if not end_times:
+            return False
+        self.__schedule_office_cycle(min(end_times) + timedelta(minutes=2))
+        return True
 
     def __schedule_office_cycle(self, run_at: Any):
         timezone = pytz.timezone(settings.TZ)
@@ -739,45 +772,122 @@ class PandaDaily(_PluginBase):
 
     @staticmethod
     def __select_office_dispatch(
-        board: dict[str, Any], duration_hours: int,
+        board: dict[str, Any], duration_hours: Optional[int],
     ) -> Optional[Tuple[dict[str, Any], Tuple[dict[str, Any], ...]]]:
         offers = [
             offer for offer in board.get("offers") or []
             if not offer.get("is_started")
-            and int((offer.get("offer_snapshot_text") or {}).get("duration_hours") or 0) == duration_hours
+            and (
+                duration_hours is None
+                or int((offer.get("offer_snapshot_text") or {}).get("duration_hours") or 0)
+                == duration_hours
+            )
         ]
         members = [member for member in board.get("eligible_members") or [] if member.get("can_dispatch")]
         team_limit = int(board.get("team_size_limit") or 0)
-        if not offers or not members or team_limit < 1:
+        available_slots = max(
+            0,
+            int(board.get("parallel_limit") or 0) - len(board.get("running") or []),
+        )
+        if not offers or not members or team_limit < 1 or available_slots < 1:
             return None
 
-        offers.sort(
-            key=lambda offer: (
-                float((offer.get("offer_snapshot_text") or {}).get("base_exp") or 0),
-                float((offer.get("offer_snapshot_text") or {}).get("base_bonus") or 0),
-            ),
-            reverse=True,
-        )
-        offer = offers[0]
-        snapshot = offer.get("offer_snapshot_text") or {}
-        team_size = min(
-            max(1, int(snapshot.get("recommended_team_size") or 1)),
-            team_limit,
-            len(members),
-        )
-        targets = snapshot.get("focus_targets") or {}
-
-        def team_score(team: Tuple[dict[str, Any], ...]) -> float:
-            score = 0.0
-            for attribute, target in targets.items():
-                best = max(
-                    float(((member.get("trait_summary") or {}).get("attributes") or {}).get(attribute) or 0)
+        candidates = []
+        for offer_index, offer in enumerate(offers):
+            snapshot = offer.get("offer_snapshot_text") or {}
+            team_size = min(
+                max(1, int(snapshot.get("recommended_team_size") or 1)),
+                team_limit,
+                len(members),
+            )
+            targets = snapshot.get("focus_targets") or {}
+            duration = max(1.0, float(snapshot.get("duration_hours") or 1))
+            base_bonus = float(snapshot.get("base_bonus") or 0)
+            base_exp = float(snapshot.get("base_exp") or 0)
+            offer_candidates = []
+            for team in combinations(members, team_size):
+                coverage = 1.0 if not targets else 0.0
+                if targets:
+                    coverage = sum(
+                        min(
+                            max(
+                                float(
+                                    ((member.get("trait_summary") or {}).get("attributes") or {}).get(attribute)
+                                    or 0
+                                )
+                                for member in team
+                            ) / max(float(target), 1.0),
+                            1.0,
+                        )
+                        for attribute, target in targets.items()
+                    ) / len(targets)
+                member_ids = frozenset(
+                    member.get("relationship_id") or member.get("slave_uid") or id(member)
                     for member in team
                 )
-                score += min(best / max(float(target), 1.0), 1.0)
-            return score
+                offer_candidates.append({
+                    "offer": offer,
+                    "offer_key": offer.get("id") or offer_index,
+                    "team": team,
+                    "member_ids": member_ids,
+                    "coverage": coverage,
+                    "magic_rate": base_bonus / duration,
+                    "exp_rate": base_exp / duration,
+                    "base_bonus": base_bonus,
+                })
+            offer_candidates.sort(
+                key=lambda item: (
+                    item["coverage"], item["magic_rate"], item["exp_rate"]
+                ),
+                reverse=True,
+            )
+            candidates.append(offer_candidates[:30])
 
-        return offer, max(combinations(members, team_size), key=team_score)
+        best_plan = []
+        best_key = (-1, -1, -1.0, -1.0, -1.0, -1.0)
+
+        def plan_key(plan: list[dict[str, Any]]) -> tuple:
+            return (
+                len(plan),
+                sum(1 for item in plan if item["coverage"] >= 0.999),
+                sum(item["coverage"] for item in plan),
+                sum(item["magic_rate"] for item in plan),
+                sum(item["exp_rate"] for item in plan),
+                sum(item["base_bonus"] for item in plan),
+            )
+
+        def search(offer_index: int, plan: list[dict[str, Any]], used_members: set):
+            nonlocal best_plan, best_key
+            current_key = plan_key(plan)
+            if current_key > best_key:
+                best_key = current_key
+                best_plan = list(plan)
+            if len(plan) >= available_slots or offer_index >= len(candidates):
+                return
+            search(offer_index + 1, plan, used_members)
+            for candidate in candidates[offer_index]:
+                if candidate["member_ids"] & used_members:
+                    continue
+                plan.append(candidate)
+                search(
+                    offer_index + 1,
+                    plan,
+                    used_members | set(candidate["member_ids"]),
+                )
+                plan.pop()
+
+        search(0, [], set())
+        if not best_plan:
+            return None
+        selected = best_plan[0]
+        logger.info(
+            "PANDA 事务所智能分配：规划 %s 个栏位，首单属性匹配 %.1f%%，"
+            "单位时间 %.1f 魔力/小时",
+            len(best_plan),
+            selected["coverage"] * 100,
+            selected["magic_rate"],
+        )
+        return selected["offer"], selected["team"]
 
     def __resolve_cookie(self) -> str:
         site_cookie = self.__site_cookie()
@@ -926,6 +1036,7 @@ class PandaDaily(_PluginBase):
             "retry_count": self._retry_count,
             "retry_interval": self._retry_interval,
             "office_enabled": self._office_enabled,
+            "office_smart": self._office_smart,
             "office_duration": self._office_duration,
             "site_domain": self._site_domain,
             "work_key": self._work_key,
