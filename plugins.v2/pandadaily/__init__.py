@@ -31,7 +31,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。"
     plugin_icon = "signin.png"
-    plugin_version = "1.4.0"
+    plugin_version = "1.6.0"
     plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -52,8 +52,6 @@ class PandaDaily(_PluginBase):
     _retry_count = 2
     _retry_interval = 60.0
     _office_enabled = True
-    _office_smart = True
-    _office_duration = 6
     _operation_lock = Lock()
     _work_key = "greeting"
     _interaction_key = "pat"
@@ -89,13 +87,6 @@ class PandaDaily(_PluginBase):
         {"title": "小奖励", "value": "reward"},
         {"title": "深入交流", "value": "deep_communication"},
     ]
-    _office_duration_options = [
-        {"title": "6 小时", "value": 6},
-        {"title": "12 小时", "value": 12},
-        {"title": "18 小时", "value": 18},
-        {"title": "24 小时", "value": 24},
-    ]
-
     def init_plugin(self, config: dict = None):
         # 配置变更时先停止旧的一次性调度器，避免重复触发。
         self.stop_service()
@@ -111,8 +102,6 @@ class PandaDaily(_PluginBase):
             self._retry_count = max(0, self.__int_value(config.get("retry_count"), 2))
             self._retry_interval = max(0, self.__float_value(config.get("retry_interval"), 60.0))
             self._office_enabled = bool(config.get("office_enabled", True))
-            self._office_smart = bool(config.get("office_smart", True))
-            self._office_duration = max(1, self.__int_value(config.get("office_duration"), 6))
             self._work_key = (config.get("work_key") or "greeting").strip()
             self._interaction_key = (config.get("interaction_key") or "pat").strip()
             self._last_result = config.get("last_result") or self._last_result
@@ -238,31 +227,6 @@ class PandaDaily(_PluginBase):
                                         "placeholder": "默认 2",
                                         "type": "number",
                                         "min": 0,
-                                    },
-                                }],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [{
-                                    "component": "VSwitch",
-                                    "props": {
-                                        "model": "office_smart",
-                                        "label": "事务所智能分配",
-                                    },
-                                }],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [{
-                                    "component": "VSelect",
-                                    "props": {
-                                        "model": "office_duration",
-                                        "label": "固定派遣时长（关闭智能时）",
-                                        "items": self._office_duration_options,
-                                        "item-title": "title",
-                                        "item-value": "value",
                                     },
                                 }],
                             },
@@ -423,10 +387,10 @@ class PandaDaily(_PluginBase):
                                             "3、周期不填默认9-23点随机执行1次。"
                                             "任务失败后会按配置自动重试，默认重试2次、间隔60秒。"
                                             "每日工作、互动和收益与事务所独立运行。"
-                                            "开启智能分配后会同时规划所有空闲栏位，优先填满栏位，"
+                                            "事务所会同时规划所有空闲栏位，优先填满栏位，"
                                             "再按属性匹配度和单位时间收益自动组队。"
                                             "事务所会在派遣时长结束2分钟后自动领取并续派，"
-                                            "支持6、12、18、24小时。"
+                                            "并从当前可用委托中自动选择最优方案。"
                                         ),
                                     },
                                 }],
@@ -444,8 +408,6 @@ class PandaDaily(_PluginBase):
             "retry_count": 2,
             "retry_interval": 60,
             "office_enabled": True,
-            "office_smart": True,
-            "office_duration": 6,
             "site_domain": "pandapt.net",
             "work_key": "greeting",
             "interaction_key": "pat",
@@ -646,9 +608,7 @@ class PandaDaily(_PluginBase):
             return []
         dispatched = []
         while len(board.get("running") or []) < int(board.get("parallel_limit") or 0):
-            choice = self.__select_office_dispatch(
-                board, None if self._office_smart else self._office_duration
-            )
+            choice = self.__select_office_dispatch(board)
             if not choice:
                 break
             offer, members = choice
@@ -669,16 +629,12 @@ class PandaDaily(_PluginBase):
 
         if not self.__schedule_next_office_from_board(board):
             now = datetime.now(tz=pytz.timezone(settings.TZ))
-            if dispatched:
-                self.__schedule_office_cycle(
-                    now + timedelta(hours=self._office_duration, minutes=2)
+            logger.warning("PANDA 事务所未返回有效结束时间，将在次日 00:02 再次检查")
+            self.__schedule_office_cycle(
+                (now + timedelta(days=1)).replace(
+                    hour=0, minute=2, second=0, microsecond=0
                 )
-            else:
-                self.__schedule_office_cycle(
-                    (now + timedelta(days=1)).replace(
-                        hour=0, minute=2, second=0, microsecond=0
-                    )
-                )
+            )
 
         return dispatched
 
@@ -771,17 +727,27 @@ class PandaDaily(_PluginBase):
             return False
 
     @staticmethod
+    def __office_rating(match_score: float) -> Tuple[int, str, float]:
+        """按事务所公布的评分门槛估算保底评级及奖励倍率。"""
+        score = match_score * 100
+        for threshold, rank, label, multiplier in (
+            (175, 5, "SSS", 2.20),
+            (140, 4, "SS", 1.75),
+            (120, 3, "S", 1.45),
+            (105, 2, "A", 1.20),
+            (90, 1, "B", 1.00),
+        ):
+            if score >= threshold:
+                return rank, label, multiplier
+        return 0, "C", 0.75
+
+    @staticmethod
     def __select_office_dispatch(
-        board: dict[str, Any], duration_hours: Optional[int],
+        board: dict[str, Any],
     ) -> Optional[Tuple[dict[str, Any], Tuple[dict[str, Any], ...]]]:
         offers = [
             offer for offer in board.get("offers") or []
             if not offer.get("is_started")
-            and (
-                duration_hours is None
-                or int((offer.get("offer_snapshot_text") or {}).get("duration_hours") or 0)
-                == duration_hours
-            )
         ]
         members = [member for member in board.get("eligible_members") or [] if member.get("can_dispatch")]
         team_limit = int(board.get("team_size_limit") or 0)
@@ -806,21 +772,22 @@ class PandaDaily(_PluginBase):
             base_exp = float(snapshot.get("base_exp") or 0)
             offer_candidates = []
             for team in combinations(members, team_size):
-                coverage = 1.0 if not targets else 0.0
+                match_score = 1.0
+                coverage = 1.0
                 if targets:
-                    coverage = sum(
-                        min(
-                            max(
-                                float(
-                                    ((member.get("trait_summary") or {}).get("attributes") or {}).get(attribute)
-                                    or 0
-                                )
-                                for member in team
-                            ) / max(float(target), 1.0),
-                            1.0,
-                        )
+                    # 多人委托按每位成员的相关属性共同评分。属性超过推荐值仍会
+                    # 提高评级，因此 match_score 不截断；coverage 仅用于日志展示。
+                    ratios = [
+                        float(
+                            ((member.get("trait_summary") or {}).get("attributes") or {}).get(attribute)
+                            or 0
+                        ) / max(float(target), 1.0)
+                        for member in team
                         for attribute, target in targets.items()
-                    ) / len(targets)
+                    ]
+                    match_score = sum(ratios) / len(ratios)
+                    coverage = sum(min(ratio, 1.0) for ratio in ratios) / len(ratios)
+                rating_rank, rating, reward_multiplier = PandaDaily.__office_rating(match_score)
                 member_ids = frozenset(
                     member.get("relationship_id") or member.get("slave_uid") or id(member)
                     for member in team
@@ -831,28 +798,33 @@ class PandaDaily(_PluginBase):
                     "team": team,
                     "member_ids": member_ids,
                     "coverage": coverage,
-                    "magic_rate": base_bonus / duration,
-                    "exp_rate": base_exp / duration,
+                    "match_score": match_score,
+                    "rating_rank": rating_rank,
+                    "rating": rating,
+                    "magic_rate": base_bonus * reward_multiplier / duration,
+                    "exp_rate": base_exp * reward_multiplier / duration,
                     "base_bonus": base_bonus,
                 })
             offer_candidates.sort(
                 key=lambda item: (
-                    item["coverage"], item["magic_rate"], item["exp_rate"]
+                    item["magic_rate"], item["rating_rank"], item["match_score"],
+                    item["exp_rate"], item["coverage"],
                 ),
                 reverse=True,
             )
             candidates.append(offer_candidates[:30])
 
         best_plan = []
-        best_key = (-1, -1, -1.0, -1.0, -1.0, -1.0)
+        best_key = (-1, -1.0, -1, -1.0, -1.0, -1.0, -1.0)
 
         def plan_key(plan: list[dict[str, Any]]) -> tuple:
             return (
                 len(plan),
-                sum(1 for item in plan if item["coverage"] >= 0.999),
-                sum(item["coverage"] for item in plan),
                 sum(item["magic_rate"] for item in plan),
+                sum(item["rating_rank"] for item in plan),
+                sum(item["match_score"] for item in plan),
                 sum(item["exp_rate"] for item in plan),
+                sum(item["coverage"] for item in plan),
                 sum(item["base_bonus"] for item in plan),
             )
 
@@ -881,10 +853,11 @@ class PandaDaily(_PluginBase):
             return None
         selected = best_plan[0]
         logger.info(
-            "PANDA 事务所智能分配：规划 %s 个栏位，首单属性匹配 %.1f%%，"
-            "单位时间 %.1f 魔力/小时",
+            "PANDA 事务所智能分配：规划 %s 个栏位，首单预计评级 %s，"
+            "全员属性匹配 %.1f%%，预计 %.1f 魔力/小时",
             len(best_plan),
-            selected["coverage"] * 100,
+            selected["rating"],
+            selected["match_score"] * 100,
             selected["magic_rate"],
         )
         return selected["offer"], selected["team"]
@@ -1036,8 +1009,6 @@ class PandaDaily(_PluginBase):
             "retry_count": self._retry_count,
             "retry_interval": self._retry_interval,
             "office_enabled": self._office_enabled,
-            "office_smart": self._office_smart,
-            "office_duration": self._office_duration,
             "site_domain": self._site_domain,
             "work_key": self._work_key,
             "interaction_key": self._interaction_key,
