@@ -29,9 +29,9 @@ except Exception:
 class PandaDaily(_PluginBase):
     # 插件基础信息：这些字段会显示在 MoviePilot 插件市场和插件详情中。
     plugin_name = "PANDA 每日任务"
-    plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、领取每日收益。"
+    plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、收益、事务所与每日放映。"
     plugin_icon = "signin.png"
-    plugin_version = "1.6.0"
+    plugin_version = "1.7.0"
     plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -52,6 +52,7 @@ class PandaDaily(_PluginBase):
     _retry_count = 2
     _retry_interval = 60.0
     _office_enabled = True
+    _screening_enabled = True
     _operation_lock = Lock()
     _work_key = "greeting"
     _interaction_key = "pat"
@@ -102,6 +103,7 @@ class PandaDaily(_PluginBase):
             self._retry_count = max(0, self.__int_value(config.get("retry_count"), 2))
             self._retry_interval = max(0, self.__float_value(config.get("retry_interval"), 60.0))
             self._office_enabled = bool(config.get("office_enabled", True))
+            self._screening_enabled = bool(config.get("screening_enabled", True))
             self._work_key = (config.get("work_key") or "greeting").strip()
             self._interaction_key = (config.get("interaction_key") or "pat").strip()
             self._last_result = config.get("last_result") or self._last_result
@@ -285,6 +287,14 @@ class PandaDaily(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 3},
                                 "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "screening_enabled", "label": "自动完成每日放映"},
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
                                     "component": "VTextField",
                                     "props": {
                                         "model": "delay",
@@ -387,6 +397,7 @@ class PandaDaily(_PluginBase):
                                             "3、周期不填默认9-23点随机执行1次。"
                                             "任务失败后会按配置自动重试，默认重试2次、间隔60秒。"
                                             "每日工作、互动和收益与事务所独立运行。"
+                                            "每日放映默认使用海报闪记完成全部剩余次数。"
                                             "事务所会同时规划所有空闲栏位，优先填满栏位，"
                                             "再按属性匹配度和单位时间收益自动组队。"
                                             "事务所会在派遣时长结束2分钟后自动领取并续派，"
@@ -408,6 +419,7 @@ class PandaDaily(_PluginBase):
             "retry_count": 2,
             "retry_interval": 60,
             "office_enabled": True,
+            "screening_enabled": True,
             "site_domain": "pandapt.net",
             "work_key": "greeting",
             "interaction_key": "pat",
@@ -551,13 +563,123 @@ class PandaDaily(_PluginBase):
             or (income_response.get("data") or {}).get("amount")
             or "0"
         )
+        screening_result = self.__run_screenings(cookie) if self._screening_enabled else "每日放映未开启"
         self._last_daily_date = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d")
         return (
             f"佣人 {len(assets)} 个；安排工作「{work_label}」完成 {work_done} 个，"
             f"不支持 {work_unavailable} 个，跳过 {work_skip} 个；"
             f"互动「{interaction_label}」完成 {interact_done} 个，跳过 {interact_skip} 个；"
-            f"领取收益 +{claimed_amount} 魔力"
+            f"领取收益 +{claimed_amount} 魔力；{screening_result}"
         )
+
+    def __run_screenings(self, cookie: str) -> str:
+        response = self.__post_action("friendTradeScreeningHome", cookie=cookie)
+        self.__ensure_ok(response, "读取每日放映")
+        home = response.get("data") or {}
+        if not isinstance(home, dict) or not home.get("unlocked"):
+            return "每日放映尚未解锁"
+
+        completed = 0
+        grades = []
+        posters = []
+        safety_limit = 10
+        while completed < safety_limit:
+            remaining = self.__int_value(home.get("remaining_attempts"), 0)
+            challenge = home.get("current_challenge")
+            if remaining <= 0 and not challenge:
+                break
+
+            if not challenge:
+                start = self.__post_action("friendTradeScreeningStart", {
+                    "game_key": "poster_memory",
+                    "assist_uid": 0,
+                }, cookie)
+                self.__ensure_ok(start, "开始每日放映")
+                payload = start.get("data") or {}
+                if not isinstance(payload, dict):
+                    raise RuntimeError("每日放映开始响应格式错误")
+                home = payload.get("home") or home
+                challenge = payload.get("challenge")
+
+            if not isinstance(challenge, dict):
+                raise RuntimeError("每日放映未返回有效挑战")
+            if challenge.get("game_key") != "poster_memory":
+                raise RuntimeError("存在未完成的其他放映游戏，请先在网页完成该局")
+
+            prompt = challenge.get("prompt") or {}
+            preview = prompt.get("preview") or []
+            options = prompt.get("options") or []
+            required = self.__int_value(prompt.get("required_selection_count"), 0)
+            if required <= 0 or len(preview) != required or len(options) < required:
+                raise RuntimeError("海报闪记题目格式错误")
+
+            option_by_card = {
+                json.dumps(option.get("card"), ensure_ascii=False, sort_keys=True): option.get("option_key")
+                for option in options
+                if isinstance(option, dict) and option.get("option_key")
+            }
+            selected_keys = [
+                option_by_card.get(json.dumps(card, ensure_ascii=False, sort_keys=True))
+                for card in preview
+            ]
+            if (
+                len(selected_keys) != required
+                or any(not key for key in selected_keys)
+                or len(set(selected_keys)) != required
+            ):
+                raise RuntimeError("无法匹配海报闪记答案")
+
+            preview_ms = max(1, self.__int_value(prompt.get("preview_ms"), 1))
+            initial_elapsed_ms = 0
+            try:
+                started_at = datetime.fromisoformat(str(challenge.get("started_at")))
+                server_now = datetime.fromisoformat(str(challenge.get("server_now")))
+                initial_elapsed_ms = max(0, round((server_now - started_at).total_seconds() * 1000))
+            except (TypeError, ValueError):
+                pass
+            wait_ms = max(0, preview_ms - initial_elapsed_ms) + 200
+            time.sleep(wait_ms / 1000)
+            elapsed_ms = initial_elapsed_ms + wait_ms
+            events = [
+                {"type": "toggle", "option_key": key, "selected": True, "elapsed_ms": elapsed_ms}
+                for key in selected_keys
+            ]
+            events.append({"type": "submit", "elapsed_ms": elapsed_ms})
+            submit = self.__post_action("friendTradeScreeningSubmit", {
+                "challenge_token": challenge.get("challenge_token"),
+                "events_json": json.dumps(events, ensure_ascii=False, separators=(",", ":")),
+                "answer_json": json.dumps(
+                    {"selected_option_keys": selected_keys},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }, cookie)
+            self.__ensure_ok(submit, "提交每日放映")
+            settled = submit.get("data") or {}
+            if not isinstance(settled, dict):
+                raise RuntimeError("每日放映结算响应格式错误")
+            home = settled.get("home") or home
+            result = settled.get("result") or {}
+            if settled.get("status") == "settled" and isinstance(result, dict):
+                completed += 1
+                if result.get("grade"):
+                    grades.append(str(result.get("grade")))
+                poster = result.get("poster") or {}
+                poster_name = poster.get("title_cn") or poster.get("title")
+                if poster_name:
+                    posters.append(str(poster_name))
+            elif settled.get("status") != "expired":
+                raise RuntimeError("每日放映结算状态异常")
+            self.__sleep()
+
+        if completed >= safety_limit and self.__int_value(home.get("remaining_attempts"), 0) > 0:
+            raise RuntimeError("每日放映次数异常，已触发安全上限")
+        if not completed:
+            return "每日放映今日已完成"
+        detail = f"每日放映完成 {completed} 场，评级 {'/'.join(grades) or '-'}"
+        if posters:
+            detail += f"，获得海报 {'、'.join(posters)}"
+        return detail
 
     def run_office_cycle(self):
         if not self._operation_lock.acquire(blocking=False):
@@ -1009,6 +1131,7 @@ class PandaDaily(_PluginBase):
             "retry_count": self._retry_count,
             "retry_interval": self._retry_interval,
             "office_enabled": self._office_enabled,
+            "screening_enabled": self._screening_enabled,
             "site_domain": self._site_domain,
             "work_key": self._work_key,
             "interaction_key": self._interaction_key,
