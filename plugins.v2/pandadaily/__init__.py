@@ -31,7 +31,7 @@ class PandaDaily(_PluginBase):
     plugin_name = "PANDA 每日任务"
     plugin_desc = "自动完成 PANDA 好友买卖：工作、互动、收益、事务所与每日放映。"
     plugin_icon = "signin.png"
-    plugin_version = "1.7.0"
+    plugin_version = "1.9.0"
     plugin_author = "yby432"
     author_url = "https://github.com/jxxghp/MoviePilot-Plugins"
     plugin_config_prefix = "pandadaily_"
@@ -46,12 +46,15 @@ class PandaDaily(_PluginBase):
     _cookie = ""
     _site_domain = "pandapt.net"
     _cron = ""
+    _random_start_hour = 9
+    _random_end_hour = 23
     _start_time: Optional[int] = None
     _end_time: Optional[int] = None
     _delay = 1.0
     _retry_count = 2
     _retry_interval = 60.0
     _office_enabled = True
+    _office_priority = "efficiency"
     _screening_enabled = True
     _operation_lock = Lock()
     _work_key = "greeting"
@@ -88,6 +91,10 @@ class PandaDaily(_PluginBase):
         {"title": "小奖励", "value": "reward"},
         {"title": "深入交流", "value": "deep_communication"},
     ]
+    _office_priority_options = [
+        {"title": "收益效率优先", "value": "efficiency"},
+        {"title": "评级优先", "value": "rating"},
+    ]
     def init_plugin(self, config: dict = None):
         # 配置变更时先停止旧的一次性调度器，避免重复触发。
         self.stop_service()
@@ -99,10 +106,24 @@ class PandaDaily(_PluginBase):
             self._cookie = (config.get("cookie") or "").strip()
             self._site_domain = (config.get("site_domain") or "pandapt.net").strip()
             self._cron = (config.get("cron") or "").strip()
+            self._random_start_hour = min(
+                23, max(0, self.__int_value(config.get("random_start_hour"), 9))
+            )
+            self._random_end_hour = min(
+                23, max(0, self.__int_value(config.get("random_end_hour"), 23))
+            )
+            if self._random_start_hour > self._random_end_hour:
+                logger.warning("PANDA 每日任务随机开始小时不能晚于结束小时，已恢复为 9-23")
+                self._random_start_hour, self._random_end_hour = 9, 23
             self._delay = self.__float_value(config.get("delay"), 1.0)
             self._retry_count = max(0, self.__int_value(config.get("retry_count"), 2))
             self._retry_interval = max(0, self.__float_value(config.get("retry_interval"), 60.0))
             self._office_enabled = bool(config.get("office_enabled", True))
+            self._office_priority = (
+                config.get("office_priority")
+                if config.get("office_priority") in {"efficiency", "rating"}
+                else "efficiency"
+            )
             self._screening_enabled = bool(config.get("screening_enabled", True))
             self._work_key = (config.get("work_key") or "greeting").strip()
             self._interaction_key = (config.get("interaction_key") or "pat").strip()
@@ -191,8 +212,8 @@ class PandaDaily(_PluginBase):
         elif self._enabled:
             triggers = TimerUtils.random_scheduler(
                 num_executions=1,
-                begin_hour=9,
-                end_hour=23,
+                begin_hour=self._random_start_hour,
+                end_hour=self._random_end_hour,
                 max_interval=6 * 60,
                 min_interval=2 * 60,
             )
@@ -229,6 +250,34 @@ class PandaDaily(_PluginBase):
                                         "placeholder": "默认 2",
                                         "type": "number",
                                         "min": 0,
+                                    },
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "random_start_hour",
+                                        "label": "随机开始小时",
+                                        "type": "number",
+                                        "min": 0,
+                                        "max": 23,
+                                    },
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VTextField",
+                                    "props": {
+                                        "model": "random_end_hour",
+                                        "label": "随机结束小时",
+                                        "type": "number",
+                                        "min": 0,
+                                        "max": 23,
                                     },
                                 }],
                             },
@@ -281,6 +330,20 @@ class PandaDaily(_PluginBase):
                                 "content": [{
                                     "component": "VSwitch",
                                     "props": {"model": "office_enabled", "label": "自动派遣事务所"},
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [{
+                                    "component": "VSelect",
+                                    "props": {
+                                        "model": "office_priority",
+                                        "label": "事务所派遣策略",
+                                        "items": self._office_priority_options,
+                                        "item-title": "title",
+                                        "item-value": "value",
+                                    },
                                 }],
                             },
                             {
@@ -394,12 +457,15 @@ class PandaDaily(_PluginBase):
                                         "text": (
                                             "执行周期支持：1、5位cron表达式；2、配置间隔（小时），"
                                             "如2.3/9-23（9-23点之间每隔2.3小时执行一次）；"
-                                            "3、周期不填默认9-23点随机执行1次。"
+                                            "3、周期不填时，按配置的随机开始和结束小时每天随机执行1次，"
+                                            "默认9-23点。"
                                             "任务失败后会按配置自动重试，默认重试2次、间隔60秒。"
                                             "每日工作、互动和收益与事务所独立运行。"
                                             "每日放映默认使用海报闪记完成全部剩余次数。"
-                                            "事务所会同时规划所有空闲栏位，优先填满栏位，"
-                                            "再按属性匹配度和单位时间收益自动组队。"
+                                            "事务所会同时规划所有空闲栏位，优先填满栏位。"
+                                            "收益效率优先会按评级倍率后的每小时魔力收益选队；"
+                                            "评级优先会先选预计评级和属性匹配度更高的方案，"
+                                            "同级再比较每小时收益。"
                                             "事务所会在派遣时长结束2分钟后自动领取并续派，"
                                             "并从当前可用委托中自动选择最优方案。"
                                         ),
@@ -415,10 +481,13 @@ class PandaDaily(_PluginBase):
             "notify": True,
             "onlyonce": False,
             "cron": "",
+            "random_start_hour": 9,
+            "random_end_hour": 23,
             "delay": 1,
             "retry_count": 2,
             "retry_interval": 60,
             "office_enabled": True,
+            "office_priority": "efficiency",
             "screening_enabled": True,
             "site_domain": "pandapt.net",
             "work_key": "greeting",
@@ -863,8 +932,8 @@ class PandaDaily(_PluginBase):
                 return rank, label, multiplier
         return 0, "C", 0.75
 
-    @staticmethod
     def __select_office_dispatch(
+        self,
         board: dict[str, Any],
     ) -> Optional[Tuple[dict[str, Any], Tuple[dict[str, Any], ...]]]:
         offers = [
@@ -927,19 +996,38 @@ class PandaDaily(_PluginBase):
                     "exp_rate": base_exp * reward_multiplier / duration,
                     "base_bonus": base_bonus,
                 })
-            offer_candidates.sort(
-                key=lambda item: (
-                    item["magic_rate"], item["rating_rank"], item["match_score"],
-                    item["exp_rate"], item["coverage"],
-                ),
-                reverse=True,
-            )
+            if self._office_priority == "rating":
+                offer_candidates.sort(
+                    key=lambda item: (
+                        item["rating_rank"], item["match_score"], item["magic_rate"],
+                        item["exp_rate"], item["coverage"], item["base_bonus"],
+                    ),
+                    reverse=True,
+                )
+            else:
+                offer_candidates.sort(
+                    key=lambda item: (
+                        item["magic_rate"], item["rating_rank"], item["match_score"],
+                        item["exp_rate"], item["coverage"],
+                    ),
+                    reverse=True,
+                )
             candidates.append(offer_candidates[:30])
 
         best_plan = []
         best_key = (-1, -1.0, -1, -1.0, -1.0, -1.0, -1.0)
 
         def plan_key(plan: list[dict[str, Any]]) -> tuple:
+            if self._office_priority == "rating":
+                return (
+                    len(plan),
+                    sum(item["rating_rank"] for item in plan),
+                    sum(item["match_score"] for item in plan),
+                    sum(item["magic_rate"] for item in plan),
+                    sum(item["exp_rate"] for item in plan),
+                    sum(item["coverage"] for item in plan),
+                    sum(item["base_bonus"] for item in plan),
+                )
             return (
                 len(plan),
                 sum(item["magic_rate"] for item in plan),
@@ -975,8 +1063,9 @@ class PandaDaily(_PluginBase):
             return None
         selected = best_plan[0]
         logger.info(
-            "PANDA 事务所智能分配：规划 %s 个栏位，首单预计评级 %s，"
+            "PANDA 事务所智能分配（%s）：规划 %s 个栏位，首单预计评级 %s，"
             "全员属性匹配 %.1f%%，预计 %.1f 魔力/小时",
+            "评级优先" if self._office_priority == "rating" else "收益效率优先",
             len(best_plan),
             selected["rating"],
             selected["match_score"] * 100,
@@ -1127,10 +1216,13 @@ class PandaDaily(_PluginBase):
             "notify": self._notify,
             "onlyonce": self._onlyonce,
             "cron": self._cron,
+            "random_start_hour": self._random_start_hour,
+            "random_end_hour": self._random_end_hour,
             "delay": self._delay,
             "retry_count": self._retry_count,
             "retry_interval": self._retry_interval,
             "office_enabled": self._office_enabled,
+            "office_priority": self._office_priority,
             "screening_enabled": self._screening_enabled,
             "site_domain": self._site_domain,
             "work_key": self._work_key,
